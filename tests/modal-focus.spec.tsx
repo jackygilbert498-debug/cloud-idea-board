@@ -145,23 +145,25 @@ function FocusHarness({ onClose }: { onClose: () => void }) {
   </>;
 }
 
-function FocusPredicateHarness() {
+function FocusPredicateHarness({ summaryDescendant = false }: { summaryDescendant?: boolean }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const initialFocusRef = useRef<HTMLButtonElement>(null);
+  const summaryRef = useRef<HTMLElement>(null);
+  const summaryDescendantRef = useRef<HTMLButtonElement>(null);
+  const initialFocusRef = summaryDescendant ? summaryDescendantRef : summaryRef;
   const close = () => setOpen(false);
   useModalFocus({ containerRef, initialFocusRef, onClose: close, active: open });
   return <>
     <button onClick={() => setOpen(true)}>打开过滤测试</button>
     {open && <div ref={containerRef} role="dialog" tabIndex={-1}>
-      <button ref={initialFocusRef}>首个可见控件</button>
-      <button>最后可见控件</button>
-      <button disabled tabIndex={0}>显式 tabIndex 的禁用按钮</button>
-      <button hidden>hidden 控件</button>
-      <div aria-hidden="true"><button>aria-hidden 祖先内控件</button></div>
-      <div style={{ display: "none" }}><button>display none 祖先内控件</button></div>
-      <div style={{ visibility: "hidden" }}><button>visibility hidden 祖先内控件</button></div>
-      <div inert><button>inert 祖先内控件</button></div>
+      <button style={{ opacity: 0 }}>opacity self 控件</button>
+      <div style={{ opacity: 0 }}><button>opacity ancestor 控件</button></div>
+      <details>
+        <summary ref={summaryRef} tabIndex={summaryDescendant ? -1 : undefined}>关闭详情摘要{summaryDescendant && <button ref={summaryDescendantRef}>摘要内控件</button>}</summary>
+      </details>
+      <details open><summary tabIndex={-1}>展开详情摘要</summary><button>展开详情控件</button></details>
+      <details><summary tabIndex={-1}>另一个关闭摘要</summary><button>关闭详情内部控件</button></details>
+      <fieldset disabled><button tabIndex={0}>禁用 fieldset 内控件</button></fieldset>
     </div>}
   </>;
 }
@@ -186,11 +188,15 @@ function pixelValue(rule: string, property: string) {
   return Number(match![1]);
 }
 
-function contrastAgainstWhite(hex: string) {
+function relativeLuminance(hex: string) {
   const channels = [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16) / 255)
     .map((value) => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
-  const luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
-  return 1.05 / (luminance + 0.05);
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrast(foreground: string, background = "#ffffff") {
+  const values = [relativeLuminance(foreground), relativeLuminance(background)].sort((left, right) => right - left);
+  return (values[0] + 0.05) / (values[1] + 0.05);
 }
 
 beforeEach(() => {
@@ -213,18 +219,35 @@ afterEach(async () => {
   document.querySelector('[data-modal-focus-fallback="test"]')?.remove();
 });
 
-test("focusable filtering skips disabled and visually hidden descendants and focuses an empty container", async () => {
+test("focusable filtering matches opacity, details and disabled-fieldset browser order and focuses an empty container", async () => {
   root = createRoot(container);
   await act(async () => root!.render(<FocusPredicateHarness />));
   await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
   const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
-  const first = Array.from(dialog.querySelectorAll<HTMLButtonElement>("button"))[0];
-  const lastVisible = Array.from(dialog.querySelectorAll<HTMLButtonElement>("button"))[1];
-  first.focus();
+  const first = dialog.querySelector<HTMLElement>("summary")!;
+  const lastVisible = Array.from(dialog.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => button.textContent === "展开详情控件")!;
+  expect(document.activeElement).toBe(first);
   const reverse = new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
   document.dispatchEvent(reverse);
   expect(reverse.defaultPrevented).toBe(true);
   expect(document.activeElement).toBe(lastVisible);
+  const forward = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+  document.dispatchEvent(forward);
+  expect(forward.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(first);
+
+  await act(async () => root!.unmount());
+  root = createRoot(container);
+  await act(async () => root!.render(<FocusPredicateHarness summaryDescendant />));
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+  const summaryDescendant = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => button.textContent === "摘要内控件")!;
+  expect(document.activeElement).toBe(summaryDescendant);
+  const descendantReverse = new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
+  document.dispatchEvent(descendantReverse);
+  expect(descendantReverse.defaultPrevented).toBe(true);
+  expect(document.activeElement?.textContent).toBe("展开详情控件");
 
   await act(async () => root!.unmount());
   root = createRoot(container);
@@ -546,19 +569,24 @@ test("mobile touch targets, information text and contrast tokens meet the approv
   expect(pixelValue(cssRule(mobileCss, ".archive-row small"), "font-size")).toBeGreaterThanOrEqual(12);
 
   const token = (name: string) => css.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i"))?.[1] ?? "";
-  expect(contrastAgainstWhite(token("muted"))).toBeGreaterThanOrEqual(4.5);
-  expect(contrastAgainstWhite(token("weak"))).toBeGreaterThanOrEqual(4.5);
+  expect(contrast(token("muted"))).toBeGreaterThanOrEqual(4.5);
+  for (const background of ["#eef1f4", "#f3f5f8", "#f5f7fa", "#f7f8fb"]) {
+    expect(contrast(token("weak"), background), `weak text on ${background}`).toBeGreaterThanOrEqual(4.5);
+  }
+  for (const selector of [".remote-image-loading, .remote-image-error", ".loading-state", ".auth-shell"]) {
+    expect(cssRule(css, selector)).toContain("var(--weak)");
+  }
   expect(cssRule(css, ".search input::placeholder")).toContain("var(--weak)");
   expect(cssRule(css, ".field textarea::placeholder")).toContain("var(--weak)");
   expect(cssRule(css, "input::placeholder, textarea::placeholder")).toContain("var(--weak)");
 
   const focusOutline = cssRule(css, 'button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible, [role="button"]:focus-visible')
     .match(/outline:\s*2px solid (#[0-9a-f]{6})/i)?.[1] ?? "";
-  expect(contrastAgainstWhite(focusOutline)).toBeGreaterThanOrEqual(3);
+  expect(contrast(focusOutline)).toBeGreaterThanOrEqual(3);
   const organizerOutline = cssRule(css, ".idea-organizer button:focus-visible, .idea-organizer input:focus-visible, .idea-organizer textarea:focus-visible")
     .match(/outline:\s*2px solid (#[0-9a-f]{6})/i)?.[1] ?? "";
-  expect(contrastAgainstWhite(organizerOutline)).toBeGreaterThanOrEqual(3);
+  expect(contrast(organizerOutline)).toBeGreaterThanOrEqual(3);
   const fieldOutline = cssRule(css, ".search input:focus-visible, .field textarea:focus-visible, .title-choice input:focus-visible, .auth-input input:focus-visible, .account-password-form input:focus-visible")
     .match(/outline:\s*2px solid (#[0-9a-f]{6})/i)?.[1] ?? "";
-  expect(contrastAgainstWhite(fieldOutline)).toBeGreaterThanOrEqual(3);
+  expect(contrast(fieldOutline)).toBeGreaterThanOrEqual(3);
 });

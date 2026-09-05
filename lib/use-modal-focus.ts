@@ -8,6 +8,7 @@ const FOCUSABLE_SELECTOR = [
   "input:not([disabled])",
   "select:not([disabled])",
   "textarea:not([disabled])",
+  "summary",
   "[tabindex]:not([tabindex='-1'])",
   "[contenteditable='true']",
 ].join(",");
@@ -16,7 +17,11 @@ function isVisible(element: HTMLElement) {
   for (let current: HTMLElement | null = element; current; current = current.parentElement) {
     if (current.hidden || current.hasAttribute("inert") || current.getAttribute("aria-hidden") === "true") return false;
     const style = window.getComputedStyle(current);
-    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (style.display === "none" || style.visibility === "hidden" || Number.parseFloat(style.opacity) === 0) return false;
+    if (current instanceof HTMLDetailsElement && !current.open) {
+      const summary = Array.from(current.children).find((child) => child.tagName === "SUMMARY");
+      if (!(summary instanceof HTMLElement) || (element !== summary && !summary.contains(element))) return false;
+    }
   }
   return true;
 }
