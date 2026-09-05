@@ -320,7 +320,7 @@ function UpdatePassword({ client, onDone }: { client: NonNullable<typeof supabas
 }
 
 function AuthLoading() {
-  return <div className="auth-shell"><LoaderCircle className="spin" size={21} />正在确认登录状态…</div>;
+  return <div className="auth-shell" role="status" aria-live="polite"><LoaderCircle className="spin" size={21} />正在确认登录状态…</div>;
 }
 
 function AuthFailure({ message, onRetry }: { message: string; onRetry: () => void }) {

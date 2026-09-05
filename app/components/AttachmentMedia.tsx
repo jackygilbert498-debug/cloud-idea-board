@@ -2,8 +2,9 @@ import { ChevronLeft, ChevronRight, Download, LoaderCircle, Minus, Plus, Refresh
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clearAttachmentUrlCache, getBoardAttachmentUrl } from "@/lib/supabase-board";
 import type { AttachmentRecord } from "@/lib/types";
+import { useModalFocus } from "@/lib/use-modal-focus";
 
-export function AttachmentMedia({ attachment, className = "", eager = false }: { attachment: AttachmentRecord; className?: string; eager?: boolean }) {
+export function AttachmentMedia({ attachment, className = "", eager = false, allowRetry = true }: { attachment: AttachmentRecord; className?: string; eager?: boolean; allowRetry?: boolean }) {
   const [url, setUrl] = useState(attachment.url ?? "");
   const [status, setStatus] = useState<"loading" | "ready" | "error">(attachment.url ? "ready" : "loading");
   const [attempt, setAttempt] = useState(0);
@@ -29,7 +30,7 @@ export function AttachmentMedia({ attachment, className = "", eager = false }: {
   }, [attachment, attempt]);
 
   if (status === "error") {
-    return <div className={`remote-image remote-image-error ${className}`}><span>截图加载失败</span><button type="button" onClick={(event) => { event.stopPropagation(); retry(); }}><RefreshCw size={13} />重试</button></div>;
+    return <div className={`remote-image remote-image-error ${className}`}><span>截图加载失败</span>{allowRetry && <button type="button" onClick={(event) => { event.stopPropagation(); retry(); }}><RefreshCw size={13} />重试</button>}</div>;
   }
   if (status === "loading" || !url) {
     return <div className={`remote-image remote-image-loading ${className}`}><LoaderCircle size={17} className="spin" /><span>读取截图</span></div>;
@@ -43,6 +44,8 @@ export function ImageViewer({ attachments, initialIndex, onClose }: { attachment
   const [downloadError, setDownloadError] = useState("");
   const touchStartX = useRef<number | null>(null);
   const pinchStart = useRef<{ distance: number; zoom: number } | null>(null);
+  const viewerRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   const attachment = attachments[index];
   const go = useCallback((nextIndex: number) => {
     if (nextIndex < 0 || nextIndex >= attachments.length) return;
@@ -51,15 +54,16 @@ export function ImageViewer({ attachments, initialIndex, onClose }: { attachment
     setDownloadError("");
   }, [attachments.length]);
 
+  useModalFocus({ containerRef: viewerRef, initialFocusRef: closeRef, onClose, active: true });
+
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
       if (event.key === "ArrowLeft") go(index - 1);
       if (event.key === "ArrowRight") go(index + 1);
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [go, index, onClose]);
+  }, [go, index]);
 
   if (!attachment) return null;
   const download = async () => {
@@ -82,8 +86,8 @@ export function ImageViewer({ attachments, initialIndex, onClose }: { attachment
     return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
   };
 
-  return <div className="image-viewer" role="dialog" aria-modal="true" aria-label="查看截图">
-    <header><span>{index + 1} / {attachments.length}</span><strong title={attachment.filename}>{attachment.filename}</strong><div><button type="button" className="viewer-download desktop-only" onClick={() => void download()} aria-label="下载截图"><Download size={17} /></button><button type="button" onClick={onClose} aria-label="关闭截图"><X size={20} /></button></div></header>
+  return <div ref={viewerRef} className="image-viewer" role="dialog" aria-modal="true" aria-labelledby="image-viewer-title">
+    <header><span>{index + 1} / {attachments.length}</span><strong id="image-viewer-title" title={attachment.filename}>{attachment.filename}</strong><div><button type="button" className="viewer-download desktop-only" onClick={() => void download()} aria-label="下载截图"><Download size={17} /></button><button ref={closeRef} type="button" onClick={onClose} aria-label="关闭截图"><X size={20} /></button></div></header>
     <div className="viewer-stage"
       onTouchStart={(event) => {
         touchStartX.current = event.touches[0]?.clientX ?? null;

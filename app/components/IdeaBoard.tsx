@@ -60,6 +60,7 @@ import {
 import { OperationCoordinator, waitForInitialOutcome } from "@/lib/operation-state";
 import type { AuthStorageMode } from "@/lib/supabase-client";
 import type { AttachmentRecord, CardCreateDetails, CardDraft, CardPatch, CardRecord, CardSaveResult, Stage, SyncState } from "@/lib/types";
+import { useModalFocus } from "@/lib/use-modal-focus";
 
 const STAGE_META: Record<Stage, { label: string; hint: string }> = {
   idea: { label: "构思", hint: "先记下来，不急着做" },
@@ -68,6 +69,13 @@ const STAGE_META: Record<Stage, { label: string; hint: string }> = {
   done: { label: "已完成", hint: "结果与经验留档" },
 };
 const STAGES = Object.keys(STAGE_META) as Stage[];
+
+function activateFromKeyboard(event: React.KeyboardEvent<HTMLElement>, action: () => void) {
+  if ((event.key === "Enter" || event.key === " ") && !event.repeat) {
+    event.preventDefault();
+    action();
+  }
+}
 const LOAD_TIMEOUT = 15_000;
 const SAVE_TIMEOUT = 12_000;
 const UNDO_DURATION = 6_000;
@@ -738,12 +746,12 @@ export function IdeaBoard({ userId, displayName, authMode, isIdentityActive, onU
         <NavButton active={view === "archive"} onClick={() => setView("archive")} icon={<Archive size={16} />}>档案库</NavButton>
         <NavButton active={view === "account"} onClick={() => setView("account")} icon={<UserRound size={16} />}>账号</NavButton>
       </nav>
-      <div className={`account sync-${effectiveSyncState}`}><button type="button" className="sync-status" onClick={() => { if (effectiveSyncState === "error" || effectiveSyncState === "checking") void load(); }} disabled={effectiveSyncState !== "error" && effectiveSyncState !== "checking"}>{sync.icon}{sync.label}</button><button type="button" className="avatar" onClick={() => setView("account")} aria-label="打开个人账号">{(displayName || "我").slice(0, 1)}</button><button className="signout desktop-only" onClick={() => setView("account")}>账号</button><button className="mobile-menu-button" onClick={() => setMobileMenu((value) => !value)} aria-label="打开导航"><Menu size={17} /></button></div>
-      {mobileMenu && <nav className="mobile-menu"><button onClick={() => { setView("board"); setMobileMenu(false); }}><LayoutGrid size={15} />看板</button><button onClick={() => { setView("list"); setMobileMenu(false); }}><List size={15} />清单</button><button onClick={() => { setView("archive"); setMobileMenu(false); }}><Archive size={15} />档案库</button><button onClick={() => { setView("account"); setMobileMenu(false); }}><UserRound size={15} />账号</button></nav>}
+      <div className={`account sync-${effectiveSyncState}`}><button type="button" className="sync-status" onClick={() => { if (effectiveSyncState === "error" || effectiveSyncState === "checking") void load(); }} disabled={effectiveSyncState !== "error" && effectiveSyncState !== "checking"}>{sync.icon}{sync.label}</button><button type="button" className="avatar" onClick={() => setView("account")} aria-label="打开个人账号">{(displayName || "我").slice(0, 1)}</button><button className="signout desktop-only" onClick={() => setView("account")}>账号</button><button className="mobile-menu-button" onClick={() => setMobileMenu((value) => !value)} aria-label="打开导航" aria-expanded={mobileMenu} aria-controls="mobile-main-menu"><Menu size={17} /></button></div>
+      {mobileMenu && <nav id="mobile-main-menu" className="mobile-menu" aria-label="移动端主导航"><button aria-current={view === "board" ? "page" : undefined} onClick={() => { setView("board"); setMobileMenu(false); }}><LayoutGrid size={15} />看板</button><button aria-current={view === "list" ? "page" : undefined} onClick={() => { setView("list"); setMobileMenu(false); }}><List size={15} />清单</button><button aria-current={view === "archive" ? "page" : undefined} onClick={() => { setView("archive"); setMobileMenu(false); }}><Archive size={15} />档案库</button><button aria-current={view === "account" ? "page" : undefined} onClick={() => { setView("account"); setMobileMenu(false); }}><UserRound size={15} />账号</button></nav>}
     </header>
 
-    {view === "board" && <div className="mobile-tabs" role="tablist" aria-label="阶段">
-      {STAGES.map((stage) => <button type="button" role="tab" aria-selected={mobileStage === stage} className={mobileStage === stage ? "active" : ""} key={stage} onClick={() => setMobileStage(stage)}><span className={`stage-dot ${stage}`} />{STAGE_META[stage].label}<b>{stage === "done" ? visibleDoneCount : cards.filter((card) => card.stage === stage && !card.archived).length}</b></button>)}
+    {view === "board" && <div className="mobile-tabs" aria-label="阶段筛选">
+      {STAGES.map((stage) => <button type="button" aria-pressed={mobileStage === stage} className={mobileStage === stage ? "active" : ""} key={stage} onClick={() => setMobileStage(stage)}><span className={`stage-dot ${stage}`} />{STAGE_META[stage].label}<b>{stage === "done" ? visibleDoneCount : cards.filter((card) => card.stage === stage && !card.archived).length}</b></button>)}
     </div>}
 
     {view === "account" ? <section className="workspace account-workspace"><AccountPanel email={displayName} authMode={authMode} onUpdatePassword={onUpdatePassword} onSignOut={onSignOut} /></section> : <section className="workspace">
@@ -756,17 +764,17 @@ export function IdeaBoard({ userId, displayName, authMode, isIdentityActive, onU
 
     {view !== "account" && <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void createFromComposer(); }}><input value={composer} onChange={(event) => { const next = event.target.value; if (composer.trim() && !next.trim()) setComposerRequestId(crypto.randomUUID()); setComposer(next); }} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>}
     {undoAction && <div className="undo-toast" role="status"><Check size={16} /><span>“{undoAction.title}”已完成</span><button onClick={() => void undoCompletion()}><RotateCcw size={14} />撤销</button></div>}
-    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} isIdentityActive={activeIdentity} onClose={() => setSelected(null)} onCreate={create} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
+    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} obscured={Boolean(viewer)} isIdentityActive={activeIdentity} onClose={() => setSelected(null)} onCreate={create} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
     {viewer && <ImageViewer attachments={viewer.attachments} initialIndex={viewer.index} onClose={() => setViewer(null)} />}
   </main>;
 }
 
 function NavButton({ active, onClick, icon, children }: { active: boolean; onClick: () => void; icon: React.ReactNode; children: React.ReactNode }) {
-  return <button className={active ? "active" : ""} onClick={onClick}>{icon}{children}</button>;
+  return <button className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={onClick}>{icon}{children}</button>;
 }
 
 function FocusStrip({ cards, onOpen }: { cards: CardRecord[]; onOpen: (card: CardRecord) => void }) {
-  return <section className="focus-strip"><div className="focus-label"><Star size={15} fill="currentColor" /><span>今日焦点</span><small>{cards.length}/3</small></div><div className="focus-items">{cards.length ? cards.map((card) => <button key={card.id} onClick={() => onOpen(card)}><span>#{String(card.id).padStart(4, "0")}</span>{card.title}<ChevronRight size={14} /></button>) : <p>把最重要的事放在这里，今天会更清楚。</p>}</div></section>;
+  return <section className="focus-strip"><div className="focus-label"><Star size={15} fill="currentColor" /><span>今日焦点</span><small>{cards.length}/3</small></div><div className="focus-items">{cards.length ? cards.map((card) => <button id={`focus-card-opener-${card.id}`} key={card.id} onClick={() => onOpen(card)}><span>#{String(card.id).padStart(4, "0")}</span>{card.title}<ChevronRight size={14} /></button>) : <p>把最重要的事放在这里，今天会更清楚。</p>}</div></section>;
 }
 
 function Board({ cards, mobileStage, onOpen, onMove, onOpenImage, onOpenArchive }: { cards: CardRecord[]; mobileStage: Stage; onOpen: (card: CardRecord) => void; onMove: (card: CardRecord, stage: Stage) => void; onOpenImage: (card: CardRecord, index: number) => void; onOpenArchive: () => void }) {
@@ -775,9 +783,9 @@ function Board({ cards, mobileStage, onOpen, onMove, onOpenImage, onOpenArchive 
   return <>
     <div className="board desktop-board">{STAGES.map((stage) => {
       const stageCards = cardsForStage(stage);
-      return <section className={`column column-${stage}`} key={stage} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { const card = cards.find((item) => item.id === Number(event.dataTransfer.getData("card-id"))); if (card && card.stage !== stage) onMove(card, stage); }}><ColumnHeader stage={stage} count={stageCards.length} doneMode={doneSlice.mode} /><div className="column-body">{stageCards.map((card) => <TaskCard key={card.id} card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{stage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!stageCards.length && <div className="empty-column">暂时没有记录</div>}</div></section>;
+      return <section className={`column column-${stage}`} key={stage} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { const card = cards.find((item) => item.id === Number(event.dataTransfer.getData("card-id"))); if (card && card.stage !== stage) onMove(card, stage); }}><ColumnHeader stage={stage} count={stageCards.length} doneMode={doneSlice.mode} /><div className="column-body">{stageCards.map((card) => <TaskCard key={card.id} surface="desktop" card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{stage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!stageCards.length && <div className="empty-column">暂时没有记录</div>}</div></section>;
     })}</div>
-    <section className={`mobile-board-panel column-${mobileStage}`}><ColumnHeader stage={mobileStage} count={cardsForStage(mobileStage).length} doneMode={doneSlice.mode} /><div className="mobile-card-list">{cardsForStage(mobileStage).map((card) => <TaskCard key={card.id} card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{mobileStage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!cardsForStage(mobileStage).length && <div className="empty-column">暂时没有记录</div>}</div></section>
+    <section className={`mobile-board-panel column-${mobileStage}`}><ColumnHeader stage={mobileStage} count={cardsForStage(mobileStage).length} doneMode={doneSlice.mode} /><div className="mobile-card-list">{cardsForStage(mobileStage).map((card) => <TaskCard key={card.id} surface="mobile" card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{mobileStage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!cardsForStage(mobileStage).length && <div className="empty-column">暂时没有记录</div>}</div></section>
   </>;
 }
 
@@ -789,23 +797,23 @@ function CompletedOverflow({ count, onOpen }: { count: number; onOpen: () => voi
   return <button className="completed-overflow" onClick={onOpen}><Archive size={14} /><span>其余 {count} 条在完成与档案</span><ChevronRight size={14} /></button>;
 }
 
-function TaskCard({ card, onOpen, onOpenImage }: { card: CardRecord; onOpen: (card: CardRecord) => void; onOpenImage: (card: CardRecord, index: number) => void }) {
+function TaskCard({ card, surface, onOpen, onOpenImage }: { card: CardRecord; surface: "desktop" | "mobile"; onOpen: (card: CardRecord) => void; onOpenImage: (card: CardRecord, index: number) => void }) {
   const cover = card.attachments[0];
   return <article className="task-card" draggable onDragStart={(event) => event.dataTransfer.setData("card-id", String(card.id))}>
-    <button type="button" className="task-card-main" onClick={() => onOpen(card)}><div className="card-meta"><span>#{String(card.id).padStart(4, "0")}</span><span>{card.pendingConfirmation ? "待核对" : shortDate(card.completedAt ?? card.updatedAt)}</span></div><h3>{card.title}</h3>{(card.organizedText || card.criteria) && <p className="card-note">{card.organizedText || card.criteria}</p>}</button>
-    {cover && <div role="button" tabIndex={0} className="card-image-button" onClick={() => onOpenImage(card, 0)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpenImage(card, 0); }} aria-label={`查看 ${cover.filename}`}><AttachmentMedia key={cover.id} attachment={cover} className="card-image" />{card.attachments.length > 1 && <span className="image-count">+{card.attachments.length - 1}</span>}</div>}
-    <footer><div>{card.focus && <span className="tag focus"><Star size={12} fill="currentColor" />焦点</span>}{card.attachments.length > 0 && <span className="tag"><ImageIcon size={12} />{card.attachments.length}</span>}</div><button type="button" className="card-more" onClick={() => onOpen(card)} aria-label="打开记录"><MoreHorizontal size={17} /></button></footer>
+    <button id={`card-opener-${surface}-${card.id}`} data-modal-focus-id={`card-${card.id}`} type="button" className="task-card-main" onClick={() => onOpen(card)}><div className="card-meta"><span>#{String(card.id).padStart(4, "0")}</span><span>{card.pendingConfirmation ? "待核对" : shortDate(card.completedAt ?? card.updatedAt)}</span></div><h3>{card.title}</h3>{(card.organizedText || card.criteria) && <p className="card-note">{card.organizedText || card.criteria}</p>}</button>
+    {cover && <div id={`attachment-opener-${surface}-${cover.id}`} data-modal-focus-id={`attachment-${cover.id}`} role="button" tabIndex={0} className="card-image-button" onClick={() => onOpenImage(card, 0)} onKeyDown={(event) => activateFromKeyboard(event, () => onOpenImage(card, 0))} aria-label={`查看 ${cover.filename}`}><AttachmentMedia key={cover.id} attachment={cover} className="card-image" allowRetry={false} />{card.attachments.length > 1 && <span className="image-count">+{card.attachments.length - 1}</span>}</div>}
+    <footer><div>{card.focus && <span className="tag focus"><Star size={12} fill="currentColor" />焦点</span>}{card.attachments.length > 0 && <span className="tag"><ImageIcon size={12} />{card.attachments.length}</span>}</div><button id={`card-more-${surface}-${card.id}`} type="button" className="card-more" onClick={() => onOpen(card)} aria-label="打开记录"><MoreHorizontal size={17} /></button></footer>
   </article>;
 }
 
 function ListView({ cards, onOpen }: { cards: CardRecord[]; onOpen: (card: CardRecord) => void }) {
   if (!cards.length) return <EmptyState archived={false} />;
-  return <div className="list-view"><div className="list-header"><span>记录</span><span>阶段</span><span>更新</span><span /></div>{cards.map((card) => <button className="list-row" key={card.id} onClick={() => onOpen(card)}><span><b>{card.title}</b><small>#{String(card.id).padStart(4, "0")} · {card.attachments.length ? `${card.attachments.length} 张截图` : "纯文字"}</small></span><span className={`stage-chip ${card.stage}`}><i />{STAGE_META[card.stage].label}</span><time>{shortDate(card.updatedAt)}</time><ChevronRight size={16} /></button>)}</div>;
+  return <div className="list-view"><div className="list-header"><span>记录</span><span>阶段</span><span>更新</span><span /></div>{cards.map((card) => <button id={`list-card-opener-${card.id}`} className="list-row" key={card.id} onClick={() => onOpen(card)}><span><b>{card.title}</b><small>#{String(card.id).padStart(4, "0")} · {card.attachments.length ? `${card.attachments.length} 张截图` : "纯文字"}</small></span><span className={`stage-chip ${card.stage}`}><i />{STAGE_META[card.stage].label}</span><time>{shortDate(card.updatedAt)}</time><ChevronRight size={16} /></button>)}</div>;
 }
 
 function ArchiveView({ groups, onOpen, onRestore, onOpenImage }: { groups: ReturnType<typeof groupArchiveCards>; onOpen: (card: CardRecord) => void; onRestore: (card: CardRecord) => void; onOpenImage: (card: CardRecord, index: number) => void }) {
   if (!groups.length) return <EmptyState archived />;
-  return <div className="archive-groups">{groups.map((group) => <section className="archive-group" key={group.id}><header><h2>{group.label}</h2><span>{group.cards.length} 条</span></header><div>{group.cards.map((card) => <article className="archive-row" key={card.id}>{card.attachments[0] && <div role="button" tabIndex={0} className="archive-thumb" onClick={() => onOpenImage(card, 0)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpenImage(card, 0); }} aria-label="查看截图"><AttachmentMedia key={card.attachments[0].id} attachment={card.attachments[0]} /></div>}<button type="button" className="archive-row-main" onClick={() => onOpen(card)}><b>{card.title}</b><small>#{String(card.id).padStart(4, "0")} · {shortDate(card.completedAt ?? card.updatedAt)} · {card.attachments.length ? `${card.attachments.length} 张截图` : "纯文字"}</small></button><button type="button" className="restore-button" onClick={() => onRestore(card)}><RotateCcw size={14} />恢复</button></article>)}</div></section>)}</div>;
+  return <div className="archive-groups">{groups.map((group) => <section className="archive-group" key={group.id}><header><h2>{group.label}</h2><span>{group.cards.length} 条</span></header><div>{group.cards.map((card) => <article className="archive-row" key={card.id}>{card.attachments[0] && <div id={`archive-attachment-opener-${card.attachments[0].id}`} role="button" tabIndex={0} className="archive-thumb" onClick={() => onOpenImage(card, 0)} onKeyDown={(event) => activateFromKeyboard(event, () => onOpenImage(card, 0))} aria-label="查看截图"><AttachmentMedia key={card.attachments[0].id} attachment={card.attachments[0]} allowRetry={false} /></div>}<button id={`archive-card-opener-${card.id}`} type="button" className="archive-row-main" onClick={() => onOpen(card)}><b>{card.title}</b><small>#{String(card.id).padStart(4, "0")} · {shortDate(card.completedAt ?? card.updatedAt)} · {card.attachments.length ? `${card.attachments.length} 张截图` : "纯文字"}</small></button><button type="button" className="restore-button" onClick={() => onRestore(card)}><RotateCcw size={14} />恢复</button></article>)}</div></section>)}</div>;
 }
 
 function EmptyState({ archived }: { archived: boolean }) {
@@ -813,7 +821,7 @@ function EmptyState({ archived }: { archived: boolean }) {
 }
 
 function LoadingState() {
-  return <div className="loading-state"><LoaderCircle size={20} className="spin" />正在读取你的构思…</div>;
+  return <div className="loading-state" role="status" aria-live="polite"><LoaderCircle size={20} className="spin" />正在读取你的构思…</div>;
 }
 
 function PendingPreview({ file, onRemove }: { file: File; onRemove: () => void }) {
@@ -822,10 +830,11 @@ function PendingPreview({ file, onRemove }: { file: File; onRemove: () => void }
   return <figure className="pending-preview">{url && <img src={url} alt={file.name} />}<figcaption title={file.name}>{file.name}</figcaption><button type="button" onClick={onRemove} aria-label={`移除 ${file.name}`}><X size={14} /></button></figure>;
 }
 
-function Editor({ userId, card, saving, isIdentityActive, onClose, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
+function Editor({ userId, card, saving, obscured, isIdentityActive, onClose, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
   userId: string;
   card: CardRecord | null;
   saving: boolean;
+  obscured: boolean;
   isIdentityActive: () => boolean;
   onClose: () => void;
   onCreate: (title: string, stage: Stage, files: File[], details: CardCreateDetails, clientRequestId: string) => Promise<CardRecord | undefined>;
@@ -853,6 +862,10 @@ function Editor({ userId, card, saving, isIdentityActive, onClose, onCreate, onS
   const [attachmentError, setAttachmentError] = useState("");
   const [draggedAttachment, setDraggedAttachment] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const editorRef = useRef<HTMLElement>(null);
+  const titleRef = useRef<HTMLTextAreaElement>(null);
+
+  useModalFocus({ containerRef: editorRef, initialFocusRef: titleRef, onClose, active: true });
 
   useEffect(() => {
     if (!isIdentityActive()) return;
@@ -885,7 +898,6 @@ function Editor({ userId, card, saving, isIdentityActive, onClose, onCreate, onS
   }, [aiAnalysis, aiModel, aiOrganizedAt, aiPromptVersion, card, criteria, draftId, isIdentityActive, onDraftStateChange, originalText, organizedText, pendingFiles.length, result, stage, title, userId]);
 
   const addFiles = (files: File[]) => {
-    if (window.matchMedia("(max-width: 720px)").matches) return;
     const accepted: File[] = [];
     const errors: string[] = [];
     for (const file of files) {
@@ -901,6 +913,10 @@ function Editor({ userId, card, saving, isIdentityActive, onClose, onCreate, onS
   const pasteAttachment = (event: React.ClipboardEvent<HTMLElement>) => {
     const files = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file));
     if (!files.length) return;
+    if (window.matchMedia("(max-width: 720px)").matches) {
+      setAttachmentError("手机端暂不支持粘贴图片，请点“选择截图”上传。");
+      return;
+    }
     event.preventDefault();
     addFiles(files);
   };
@@ -995,23 +1011,23 @@ function Editor({ userId, card, saving, isIdentityActive, onClose, onCreate, onS
   };
   const advance = nextStage(stage);
 
-  return <div className="editor-backdrop"><aside className="editor" role="dialog" aria-modal="true" aria-label={card ? "编辑记录" : "新建构思"} onPaste={pasteAttachment} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}>
-    <header><div><span className={`stage-dot ${stage}`} /><p>{card ? `#${String(card.id).padStart(4, "0")}` : "NEW IDEA"}</p></div><button onClick={cancel} aria-label="关闭"><X size={19} /></button></header>
+  return <div className="editor-backdrop"><aside ref={editorRef} className="editor" role="dialog" aria-modal={obscured ? undefined : true} aria-hidden={obscured ? true : undefined} inert={obscured} aria-labelledby="editor-dialog-title" onPaste={pasteAttachment} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}>
+    <header><div><span className={`stage-dot ${stage}`} /><p id="editor-dialog-title">{card ? `编辑记录 #${String(card.id).padStart(4, "0")}` : "新建构思"}</p></div><button onClick={cancel} aria-label="关闭"><X size={19} /></button></header>
     <div className="editor-scroll">
       {restoredDraft && <div className="draft-restored"><FilePenLine size={14} />已恢复上次未保存的文字</div>}
-      <label className="field title-field"><span>标题</span><textarea value={title} onChange={(event) => setTitle(event.target.value)} placeholder="记下你正在想的事…" maxLength={240} rows={2} /></label>
+      <label className="field title-field"><span>标题</span><textarea ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="记下你正在想的事…" maxLength={240} rows={2} /></label>
       <fieldset className="stage-picker"><legend>所处阶段</legend>{STAGES.map((item) => <button type="button" key={item} className={stage === item ? "active" : ""} onClick={() => setStage(item)}><span className={`stage-dot ${item}`} />{STAGE_META[item].label}</button>)}</fieldset>
       <IdeaOrganizer originalText={originalText} acceptedOrganizedText={organizedText} onOriginalTextChange={setOriginalText} onAdopt={adoptOrganization} />
       {organizedText && <label className="field organized-field"><span>整理稿 <small>可继续修改</small></span><textarea value={organizedText} onChange={(event) => setOrganizedText(event.target.value)} maxLength={20_000} rows={5} /></label>}
       <label className="field"><span>完成标准 <small>可选</small></span><textarea value={criteria} onChange={(event) => setCriteria(event.target.value)} placeholder="做到什么程度，就算完成？" maxLength={4000} rows={3} /></label>
       {(stage === "done" || result) && <label className="field"><span>结果记录 <small>可选</small></span><textarea value={result} onChange={(event) => setResult(event.target.value)} placeholder="留下结果、链接或一句复盘。" maxLength={4000} rows={3} /></label>}
       <section className="attachments"><div className="section-title"><span>参考截图</span><small>{(card?.attachments.length ?? 0) + pendingFiles.length} 张</small></div>
-        {card?.attachments.length ? <div className="attachment-grid">{card.attachments.map((attachment, index) => <figure key={attachment.id} draggable onDragStart={() => setDraggedAttachment(attachment.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => void dropAttachment(attachment.id)}><div role="button" tabIndex={0} className="attachment-preview" onClick={() => onViewImage(card.attachments, index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onViewImage(card.attachments, index); }}><AttachmentMedia attachment={attachment} />{index === 0 && <span className="cover-badge">封面</span>}</div><figcaption title={attachment.filename}><GripVertical size={12} />{attachment.filename}</figcaption><div className="attachment-actions desktop-only"><button type="button" onClick={() => void moveAttachment(attachment.id, -1)} disabled={index === 0} aria-label="向前移动"><ChevronLeft size={14} /></button><button type="button" onClick={() => void moveAttachment(attachment.id, 1)} disabled={index === card.attachments.length - 1} aria-label="向后移动"><ChevronRight size={14} /></button><button type="button" onClick={() => void downloadAttachment(attachment)} aria-label="下载截图"><Download size={14} /></button><button type="button" onClick={() => { if (window.confirm("删除这张截图？此操作无法撤销。")) void onDeleteAttachment(attachment); }} aria-label="删除截图"><Trash2 size={14} /></button></div></figure>)}</div> : null}
+        {card?.attachments.length ? <div className="attachment-grid">{card.attachments.map((attachment, index) => <figure key={attachment.id} draggable onDragStart={() => setDraggedAttachment(attachment.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => void dropAttachment(attachment.id)}><div id={`editor-attachment-opener-${attachment.id}`} role="button" tabIndex={0} className="attachment-preview" onClick={() => onViewImage(card.attachments, index)} onKeyDown={(event) => activateFromKeyboard(event, () => onViewImage(card.attachments, index))} aria-label={`查看 ${attachment.filename}`}><AttachmentMedia attachment={attachment} allowRetry={false} />{index === 0 && <span className="cover-badge">封面</span>}</div><figcaption title={attachment.filename}><GripVertical size={12} />{attachment.filename}</figcaption><div className="attachment-actions desktop-only"><button type="button" onClick={() => void moveAttachment(attachment.id, -1)} disabled={index === 0} aria-label="向前移动"><ChevronLeft size={14} /></button><button type="button" onClick={() => void moveAttachment(attachment.id, 1)} disabled={index === card.attachments.length - 1} aria-label="向后移动"><ChevronRight size={14} /></button><button type="button" onClick={() => void downloadAttachment(attachment)} aria-label="下载截图"><Download size={14} /></button><button type="button" onClick={() => { if (window.confirm("删除这张截图？此操作无法撤销。")) void onDeleteAttachment(attachment); }} aria-label="删除截图"><Trash2 size={14} /></button></div></figure>)}</div> : null}
         {pendingFiles.length > 0 && <div className="pending-grid">{pendingFiles.map((file, index) => <PendingPreview key={`${file.name}:${file.size}:${file.lastModified}`} file={file} onRemove={() => setPendingFiles((current) => current.filter((_item, itemIndex) => itemIndex !== index))} />)}</div>}
-        {!card?.attachments.length && !pendingFiles.length && <div className="no-attachment"><ImageIcon size={20} /><span>还没有参考截图</span><small className="desktop-only">可直接按 ⌘V 或拖入多张截图</small><small className="mobile-only">手机端仅查看截图</small></div>}
+        {!card?.attachments.length && !pendingFiles.length && <div className="no-attachment"><ImageIcon size={20} /><span>还没有参考截图</span><small className="desktop-only">可粘贴、拖入或选择多张截图</small><small className="mobile-only">可点“选择截图”上传</small></div>}
         {attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}
-        <input className="visually-hidden" ref={inputRef} type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
-        <button type="button" className="upload-button desktop-only" onClick={() => inputRef.current?.click()}><Upload size={15} />粘贴、拖入或选择截图<small>⌘V / JPG / PNG / WebP</small></button>
+        <input id="editor-attachment-input" name="attachments" aria-label="选择参考截图" tabIndex={-1} className="visually-hidden" ref={inputRef} type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
+        <button type="button" className="upload-button" aria-controls="editor-attachment-input" onClick={() => inputRef.current?.click()}><Upload size={15} /><span className="desktop-only">粘贴、拖入或选择截图</span><span className="mobile-only">选择截图</span><small>JPG / PNG / WebP</small></button>
       </section>
       {card && <div className="editor-options">{card.stage !== "done" && !card.archived && <button onClick={() => { void onSave(card.id, { focus: !card.focus }).catch(() => undefined); }}><Star size={16} fill={card.focus ? "currentColor" : "none"} />{card.focus ? "移出今日焦点" : "设为今日焦点"}</button>}<button onClick={() => { void onSave(card.id, { reference: !card.reference }).catch(() => undefined); }}><FileText size={16} />{card.reference ? "取消参考" : "标记为参考"}</button>{(card.stage === "done" || card.archived) ? <button onClick={() => { void onSave(card.id, { stage: restoreStage(card), archived: false }).catch(() => undefined); }}><RotateCcw size={16} />恢复处理</button> : <button onClick={() => { void onSave(card.id, { archived: true }).catch(() => undefined); }}><Archive size={16} />归档</button>}</div>}
     </div>
