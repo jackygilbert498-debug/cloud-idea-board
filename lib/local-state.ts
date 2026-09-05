@@ -2,6 +2,7 @@ import { isStage } from "@/lib/types";
 import type { AttachmentRecord, CardDraft, CardRecord, IdeaAnalysis, IdeaAnalysisItem } from "@/lib/types";
 
 const STORAGE_PREFIX = "cloud-memo-board:v2";
+const REMEMBERED_EMAIL_KEY = `${STORAGE_PREFIX}:remembered-email`;
 
 function storageAvailable(): boolean {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
@@ -32,6 +33,29 @@ export function boardCacheKey(userId: string): string {
 
 export function draftKey(userId: string, cardId: number | "new" | "composer"): string {
   return `${STORAGE_PREFIX}:draft:${userId}:${cardId}`;
+}
+
+export function readRememberedEmail(): string {
+  if (!storageAvailable()) return "";
+  return window.localStorage.getItem(REMEMBERED_EMAIL_KEY)?.trim() ?? "";
+}
+
+export function setRememberedLogin(email: string, remember: boolean): void {
+  if (!storageAvailable()) return;
+  const cleanEmail = email.trim();
+  if (!remember || !cleanEmail) window.localStorage.removeItem(REMEMBERED_EMAIL_KEY);
+  else window.localStorage.setItem(REMEMBERED_EMAIL_KEY, cleanEmail);
+}
+
+/** Removes only one exact user's application projection; auth and preferences are separate namespaces. */
+export function clearUserLocalState(userId: string): void {
+  if (!storageAvailable()) return;
+  const boardKey = boardCacheKey(userId);
+  const userDraftPrefix = `${STORAGE_PREFIX}:draft:${userId}:`;
+  for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+    const key = window.localStorage.key(index);
+    if (key === boardKey || key?.startsWith(userDraftPrefix)) window.localStorage.removeItem(key);
+  }
 }
 
 export function readBoardCache(userId: string): CardRecord[] {

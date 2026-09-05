@@ -68,6 +68,14 @@ import { boardCacheKey, draftKey, readBoardCache, writeBoardCache } from "@/lib/
 import type { AttachmentRecord } from "@/lib/types";
 
 const USER_ID = "00000000-0000-4000-8000-000000000001";
+const boardProps: Parameters<typeof IdeaBoard>[0] = {
+  userId: USER_ID,
+  displayName: "测试",
+  authMode: "persistent",
+  isIdentityActive: () => true,
+  onUpdatePassword: async () => undefined,
+  onSignOut: async () => undefined,
+};
 const OTHER_USER_ID = "00000000-0000-4000-8000-000000000002";
 const A_ID = "10000000-0000-4000-8000-000000000001";
 const B_ID = "10000000-0000-4000-8000-000000000002";
@@ -932,7 +940,7 @@ describe("card creation and attachment ordering", () => {
     let root = createRoot(container);
 
     await act(async () => {
-      root.render(createElement(IdeaBoard, { userId: USER_ID, displayName: "测试", onSignOut: () => undefined }));
+      root.render(createElement(IdeaBoard, boardProps));
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -945,7 +953,7 @@ describe("card creation and attachment ordering", () => {
 
     root = createRoot(container);
     await act(async () => {
-      root.render(createElement(IdeaBoard, { userId: USER_ID, displayName: "测试", onSignOut: () => undefined }));
+      root.render(createElement(IdeaBoard, boardProps));
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -1070,7 +1078,7 @@ describe("card creation and attachment ordering", () => {
 
 async function renderBoard(root: ReturnType<typeof createRoot>): Promise<void> {
   await act(async () => {
-    root.render(createElement(IdeaBoard, { userId: USER_ID, displayName: "测试", onSignOut: () => undefined }));
+    root.render(createElement(IdeaBoard, boardProps));
     await Promise.resolve();
     await Promise.resolve();
   });

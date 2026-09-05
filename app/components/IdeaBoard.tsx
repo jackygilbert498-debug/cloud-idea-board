@@ -27,9 +27,12 @@ import {
   Star,
   Trash2,
   Upload,
+  UserRound,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AccountPanel } from "@/app/components/AccountPanel";
+import type { SignOutRequest } from "@/app/components/AccountPanel";
 import { AttachmentMedia, ImageViewer } from "@/app/components/AttachmentMedia";
 import { IdeaOrganizer } from "@/app/components/IdeaOrganizer";
 import type { OrganizerAdoption } from "@/app/components/IdeaOrganizer";
@@ -55,6 +58,7 @@ import {
   writeCardDraft,
 } from "@/lib/local-state";
 import { OperationCoordinator, waitForInitialOutcome } from "@/lib/operation-state";
+import type { AuthStorageMode } from "@/lib/supabase-client";
 import type { AttachmentRecord, CardCreateDetails, CardDraft, CardPatch, CardRecord, CardSaveResult, Stage, SyncState } from "@/lib/types";
 
 const STAGE_META: Record<Stage, { label: string; hint: string }> = {
@@ -68,7 +72,7 @@ const LOAD_TIMEOUT = 15_000;
 const SAVE_TIMEOUT = 12_000;
 const UNDO_DURATION = 6_000;
 
-type View = "board" | "list" | "archive";
+type View = "board" | "list" | "archive" | "account";
 type SelectedCard = CardRecord | "new" | null;
 type UndoAction = { cardId: number; title: string; stage: Exclude<Stage, "done"> };
 type CardMutation = { version: number; patch: CardPatch; pendingConfirmation: boolean };
@@ -116,7 +120,14 @@ function syncLabel(state: SyncState): { label: string; icon: React.ReactNode } {
   return { label: "已同步", icon: <Cloud size={13} /> };
 }
 
-export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; displayName: string; onSignOut: () => void }) {
+export function IdeaBoard({ userId, displayName, authMode, isIdentityActive, onUpdatePassword, onSignOut }: {
+  userId: string;
+  displayName: string;
+  authMode: AuthStorageMode;
+  isIdentityActive: () => boolean;
+  onUpdatePassword: (password: string) => Promise<void>;
+  onSignOut: (request: SignOutRequest) => Promise<void>;
+}) {
   const [initialComposerDraft] = useState(() => readCardDraft(userId, "composer"));
   const [cards, setCards] = useState<CardRecord[]>(() => readBoardCache(userId));
   const [view, setView] = useState<View>("board");
@@ -141,14 +152,18 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const localFieldRevisionsRef = useRef(new Map<number, Map<keyof CardRecord, number>>());
   const attachmentDeletionRevisionsRef = useRef(new Map<number, Map<string, number>>());
   const loadGenerationRef = useRef(0);
+  const identityActiveRef = useRef(isIdentityActive);
+  useEffect(() => { identityActiveRef.current = isIdentityActive; }, [isIdentityActive]);
+  const activeIdentity = useCallback(() => identityActiveRef.current(), []);
   const saving = activeOperations > 0;
   const beginOperation = useCallback(() => operationCoordinator.beginOperation(), [operationCoordinator]);
 
   const commitCards = useCallback((next: CardRecord[]) => {
+    if (!activeIdentity()) return;
     cardsRef.current = next;
     setCards(next);
     writeBoardCache(userId, next);
-  }, [userId]);
+  }, [activeIdentity, userId]);
 
   const markLocalFields = useCallback((cardId: number, fields: Iterable<keyof CardRecord>) => {
     const revision = localProjectionRevisionRef.current + 1;
@@ -248,8 +263,10 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     const generation = loadGenerationRef.current + 1;
     loadGenerationRef.current = generation;
     const localRevision = localProjectionRevisionRef.current;
-    const isCurrentLoad = () => operationCoordinator.isActiveLifecycle(lifecycle)
+    const isCurrentLoad = () => activeIdentity()
+      && operationCoordinator.isActiveLifecycle(lifecycle)
       && loadGenerationRef.current === generation;
+    if (!isCurrentLoad()) return cardsRef.current;
     if (!navigator.onLine) {
       const cached = readBoardCache(userId);
       if (cached.length) commitCards(cached);
@@ -339,7 +356,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     } finally {
       if (isCurrentLoad()) setLoading(false);
     }
-  }, [commitCards, operationCoordinator, projectMutationChain, userId]);
+  }, [activeIdentity, commitCards, operationCoordinator, projectMutationChain, userId]);
 
   useEffect(() => {
     const lifecycle = operationCoordinator.activate();
@@ -368,6 +385,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     return () => { window.removeEventListener("online", online); window.removeEventListener("offline", offline); };
   }, [load]);
   useEffect(() => {
+    if (!activeIdentity()) return;
     if (composer.trim()) writeCardDraft(userId, "composer", {
       title: composer,
       criteria: "",
@@ -382,7 +400,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       clientRequestId: composerRequestId,
     });
     else clearCardDraft(userId, "composer");
-  }, [composer, composerRequestId, userId]);
+  }, [activeIdentity, composer, composerRequestId, userId]);
   useEffect(() => {
     if (!undoAction) return;
     const timer = setTimeout(() => setUndoAction(null), UNDO_DURATION);
@@ -406,6 +424,8 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       ? { ...patch, sortOrder: nextStageSortOrder(cardsRef.current, patch.stage) }
       : patch;
     const lifecycle = operationCoordinator.lifecycleId;
+    const operationActive = () => activeIdentity() && operationCoordinator.isActiveLifecycle(lifecycle);
+    if (!operationActive()) throw new Error("登录状态已失效");
     const mutationVersion = operationCoordinator.nextMutationVersion(id);
     let chain = mutationChainsRef.current.get(id);
     if (!chain) {
@@ -437,7 +457,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       const queueTail = new Promise<void>((resolve) => { releaseQueue = resolve; });
       mutationQueuesRef.current.set(id, queueTail);
       const completion = previous.then(() => {
-        if (!operationCoordinator.isActiveLifecycle(lifecycle)) {
+        if (!operationActive()) {
           throw new Error("保存已因页面切换取消");
         }
         const knownCard = mutationChainsRef.current.get(id)?.base
@@ -454,14 +474,14 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         if (pendingOperation) pendingOperation.pendingConfirmation = true;
         const pendingChain = mutationChainsRef.current.get(id);
         const pendingCard = pendingChain ? projectMutationChain(pendingChain) : optimistic;
-        if (operationCoordinator.isActiveLifecycle(lifecycle) && pendingOperation) {
+        if (operationActive() && pendingOperation) {
           commitCard(pendingCard, false, localFields);
           setError("保存结果待核对，内容和本机草稿已保留；不会自动重复提交。");
           setSyncState("checking");
         }
         finishesInBackground = true;
         void completion.then((card) => {
-          if (!operationCoordinator.isActiveLifecycle(lifecycle)) return;
+          if (!operationActive()) return;
           const settled = settleCardMutation(id, mutationVersion, { state: "confirmed", card });
           if (!settled) return;
           commitCard(settled.card, settled.remaining.length === 0, localFields);
@@ -474,7 +494,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
             setUndoAction({ cardId: id, title: before.title, stage: before.stage });
           }
         }, (reason: unknown) => {
-          if (!operationCoordinator.isActiveLifecycle(lifecycle)) return;
+          if (!operationActive()) return;
           const settled = settleCardMutation(id, mutationVersion, { state: "failed" });
           if (!settled) return;
           commitCard(settled.card, settled.remaining.length === 0, localFields);
@@ -488,7 +508,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         });
         return { card: pendingCard, state: "pending" };
       }
-      const lifecycleActive = operationCoordinator.isActiveLifecycle(lifecycle);
+      const lifecycleActive = operationActive();
       const settled = lifecycleActive
         ? settleCardMutation(id, mutationVersion, { state: "confirmed", card: initial.value })
         : null;
@@ -508,7 +528,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         state: lifecycleActive && settled ? "confirmed" : "pending",
       };
     } catch (reason) {
-      const settled = operationCoordinator.isActiveLifecycle(lifecycle)
+      const settled = operationActive()
         ? settleCardMutation(id, mutationVersion, { state: "failed" })
         : null;
       if (settled) {
@@ -525,9 +545,12 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         finishOperation();
       }
     }
-  }, [beginOperation, commitCard, operationCoordinator, projectMutationChain, settleCardMutation, userId]);
+  }, [activeIdentity, beginOperation, commitCard, operationCoordinator, projectMutationChain, settleCardMutation, userId]);
 
   const uploadFiles = useCallback(async (cardId: number, files: File[]) => {
+    const lifecycle = operationCoordinator.lifecycleId;
+    const operationActive = () => activeIdentity() && operationCoordinator.isActiveLifecycle(lifecycle);
+    if (!operationActive()) return files;
     const failed: File[] = [];
     const messages: string[] = [];
     const finishOperation = beginOperation();
@@ -540,13 +563,15 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       for (const file of files) {
         try {
           await uploadBoardAttachment(cardId, file);
+          if (!operationActive()) return files;
         } catch (reason) {
+          if (!operationActive()) return files;
           failed.push(file);
           messages.push(`${file.name}：${reason instanceof Error ? reason.message : "上传失败"}`);
         }
       }
       await load();
-      if (messages.length) {
+      if (operationActive() && messages.length) {
         setError(`部分截图未上传：${messages.join("；")}`);
         setSyncState("error");
       }
@@ -554,7 +579,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     } finally {
       finishOperation();
     }
-  }, [beginOperation, load]);
+  }, [activeIdentity, beginOperation, load, operationCoordinator]);
 
   const create = useCallback(async (
     title: string,
@@ -566,6 +591,9 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     const clean = title.trim();
     if (!clean && !details.originalText?.trim()) return undefined;
     let createdCard: CardRecord | undefined;
+    const lifecycle = operationCoordinator.lifecycleId;
+    const operationActive = () => activeIdentity() && operationCoordinator.isActiveLifecycle(lifecycle);
+    if (!operationActive()) return undefined;
     const finishOperation = beginOperation();
     setSyncState(navigator.onLine ? "syncing" : "offline");
     try {
@@ -574,10 +602,17 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       // Creation is intentionally not force-timed-out: an insert can still finish after a
       // client timeout, and an automatic retry could otherwise create a duplicate memo.
       createdCard = await createBoardCard(clean, stage, details, clientRequestId, nextStageSortOrder(cardsRef.current, stage));
+      if (!operationActive()) return undefined;
       const failed: string[] = [];
       for (const file of files) {
-        try { await uploadBoardAttachment(createdCard.id, file); }
-        catch (reason) { failed.push(`${file.name}：${reason instanceof Error ? reason.message : "上传失败"}`); }
+        try {
+          await uploadBoardAttachment(createdCard.id, file);
+          if (!operationActive()) return undefined;
+        }
+        catch (reason) {
+          if (!operationActive()) return undefined;
+          failed.push(`${file.name}：${reason instanceof Error ? reason.message : "上传失败"}`);
+        }
       }
       if (files.length) {
         const data = await load();
@@ -586,9 +621,11 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         commitCard(createdCard);
         setSyncState("synced");
       }
+      if (!operationActive()) return undefined;
       if (failed.length) setError(`构思已保存，部分截图未上传：${failed.join("；")}`);
       return createdCard;
     } catch (reason) {
+      if (!operationActive()) return undefined;
       setError(reason instanceof Error ? reason.message : "创建失败");
       setSyncState(navigator.onLine ? "error" : "offline");
       if (createdCard) commitCard(createdCard);
@@ -596,16 +633,16 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     } finally {
       finishOperation();
     }
-  }, [beginOperation, commitCard, load]);
+  }, [activeIdentity, beginOperation, commitCard, load, operationCoordinator]);
 
   const createFromComposer = useCallback(async () => {
     const created = await create(composer, "idea", [], {}, composerRequestId);
-    if (created) {
+    if (created && activeIdentity()) {
       setComposer("");
       clearCardDraft(userId, "composer");
       setComposerRequestId(crypto.randomUUID());
     }
-  }, [composer, composerRequestId, create, userId]);
+  }, [activeIdentity, composer, composerRequestId, create, userId]);
 
   const hideAttachmentProjection = useCallback((attachmentId: string) => {
     const hide = (card: CardRecord): CardRecord => ({
@@ -625,34 +662,43 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   }, [commitCards, markAttachmentDeleted]);
 
   const removeAttachment = useCallback(async (attachment: AttachmentRecord) => {
+    const lifecycle = operationCoordinator.lifecycleId;
+    const operationActive = () => activeIdentity() && operationCoordinator.isActiveLifecycle(lifecycle);
+    if (!operationActive()) return;
     const finishOperation = beginOperation();
     setSyncState(navigator.onLine ? "syncing" : "offline");
     try {
       if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再删除截图");
       await deleteBoardAttachment(attachment);
+      if (!operationActive()) return;
       hideAttachmentProjection(attachment.id);
       await load();
     }
     catch (reason) {
+      if (!operationActive()) return;
       const message = reason instanceof Error ? reason.message : "截图删除失败";
       if (reason instanceof AttachmentDeleteError && reason.projection === "hidden") {
         hideAttachmentProjection(attachment.id);
       }
       if (navigator.onLine) await load();
+      if (!operationActive()) return;
       // load() clears its own notice on success, so restore the mutation error last.
       setError(message);
       setSyncState(navigator.onLine ? "error" : "offline");
     }
     finally { finishOperation(); }
-  }, [beginOperation, hideAttachmentProjection, load]);
+  }, [activeIdentity, beginOperation, hideAttachmentProjection, load, operationCoordinator]);
 
   const reorderAttachments = useCallback(async (cardId: number, ids: string[]) => {
+    const lifecycle = operationCoordinator.lifecycleId;
+    const operationActive = () => activeIdentity() && operationCoordinator.isActiveLifecycle(lifecycle);
+    if (!operationActive()) return;
     const finishOperation = beginOperation();
     setSyncState(navigator.onLine ? "syncing" : "offline");
-    try { if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再调整截图"); await reorderBoardAttachments(cardId, ids); await load(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "截图排序失败"); setSyncState(navigator.onLine ? "error" : "offline"); }
+    try { if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再调整截图"); await reorderBoardAttachments(cardId, ids); if (!operationActive()) return; await load(); }
+    catch (reason) { if (operationActive()) { setError(reason instanceof Error ? reason.message : "截图排序失败"); setSyncState(navigator.onLine ? "error" : "offline"); } }
     finally { finishOperation(); }
-  }, [beginOperation, load]);
+  }, [activeIdentity, beginOperation, load, operationCoordinator]);
 
   const restore = useCallback(async (card: CardRecord) => {
     try { await mutate(card.id, { stage: restoreStage(card), archived: false }); }
@@ -690,26 +736,27 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         <NavButton active={view === "board"} onClick={() => setView("board")} icon={<LayoutGrid size={16} />}>看板</NavButton>
         <NavButton active={view === "list"} onClick={() => setView("list")} icon={<List size={16} />}>清单</NavButton>
         <NavButton active={view === "archive"} onClick={() => setView("archive")} icon={<Archive size={16} />}>档案库</NavButton>
+        <NavButton active={view === "account"} onClick={() => setView("account")} icon={<UserRound size={16} />}>账号</NavButton>
       </nav>
-      <div className={`account sync-${effectiveSyncState}`}><button type="button" className="sync-status" onClick={() => { if (effectiveSyncState === "error" || effectiveSyncState === "checking") void load(); }} disabled={effectiveSyncState !== "error" && effectiveSyncState !== "checking"}>{sync.icon}{sync.label}</button><span className="avatar">{(displayName || "我").slice(0, 1)}</span><button className="signout desktop-only" onClick={onSignOut}>退出</button><button className="mobile-menu-button" onClick={() => setMobileMenu((value) => !value)} aria-label="打开导航"><Menu size={17} /></button></div>
-      {mobileMenu && <nav className="mobile-menu"><button onClick={() => { setView("board"); setMobileMenu(false); }}><LayoutGrid size={15} />看板</button><button onClick={() => { setView("list"); setMobileMenu(false); }}><List size={15} />清单</button><button onClick={() => { setView("archive"); setMobileMenu(false); }}><Archive size={15} />档案库</button><button onClick={onSignOut}>退出</button></nav>}
+      <div className={`account sync-${effectiveSyncState}`}><button type="button" className="sync-status" onClick={() => { if (effectiveSyncState === "error" || effectiveSyncState === "checking") void load(); }} disabled={effectiveSyncState !== "error" && effectiveSyncState !== "checking"}>{sync.icon}{sync.label}</button><button type="button" className="avatar" onClick={() => setView("account")} aria-label="打开个人账号">{(displayName || "我").slice(0, 1)}</button><button className="signout desktop-only" onClick={() => setView("account")}>账号</button><button className="mobile-menu-button" onClick={() => setMobileMenu((value) => !value)} aria-label="打开导航"><Menu size={17} /></button></div>
+      {mobileMenu && <nav className="mobile-menu"><button onClick={() => { setView("board"); setMobileMenu(false); }}><LayoutGrid size={15} />看板</button><button onClick={() => { setView("list"); setMobileMenu(false); }}><List size={15} />清单</button><button onClick={() => { setView("archive"); setMobileMenu(false); }}><Archive size={15} />档案库</button><button onClick={() => { setView("account"); setMobileMenu(false); }}><UserRound size={15} />账号</button></nav>}
     </header>
 
     {view === "board" && <div className="mobile-tabs" role="tablist" aria-label="阶段">
       {STAGES.map((stage) => <button type="button" role="tab" aria-selected={mobileStage === stage} className={mobileStage === stage ? "active" : ""} key={stage} onClick={() => setMobileStage(stage)}><span className={`stage-dot ${stage}`} />{STAGE_META[stage].label}<b>{stage === "done" ? visibleDoneCount : cards.filter((card) => card.stage === stage && !card.archived).length}</b></button>)}
     </div>}
 
-    <section className="workspace">
+    {view === "account" ? <section className="workspace account-workspace"><AccountPanel email={displayName} authMode={authMode} onUpdatePassword={onUpdatePassword} onSignOut={onSignOut} /></section> : <section className="workspace">
       <div className="heading-row"><div><p className="eyebrow">PERSONAL MEMO BOARD</p><h1>{view === "archive" ? "完成与档案" : view === "list" ? "待处理清单" : "我的构思"}</h1><p>{view === "archive" ? "完成的内容按时间自然沉淀，也可以随时恢复。" : "记录、处理、完成，再从结果里回看。"}</p></div><button className="primary desktop-only" onClick={() => setSelected("new")}><Plus size={17} />记一个构思</button></div>
       {view !== "archive" && <FocusStrip cards={focusCards} onOpen={setSelected} />}
       <div className="toolbar"><label className="search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文字、编号或截图名称" /></label><span className="result-count">{view === "archive" ? archiveGroups.reduce((count, group) => count + group.cards.length, 0) : view === "list" ? listCards.length : activeCards.length} 条记录</span></div>
       {error && <div className="notice" role="alert"><CircleAlert size={16} /><span>{error}</span>{(syncState === "error" || effectiveSyncState === "checking") && <button className="notice-retry" onClick={() => void load()}><RefreshCw size={14} />{effectiveSyncState === "checking" ? "重新核对" : "重试"}</button>}<button onClick={() => setError("")} aria-label="关闭"><X size={15} /></button></div>}
       {loading ? <LoadingState /> : view === "board" ? <Board cards={activeCards} mobileStage={mobileStage} onOpen={setSelected} onMove={(card, stage) => { void mutate(card.id, { stage }).catch(() => undefined); }} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} onOpenArchive={() => setView("archive")} /> : view === "archive" ? <ArchiveView groups={archiveGroups} onOpen={setSelected} onRestore={(card) => void restore(card)} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} /> : <ListView cards={listCards} onOpen={setSelected} />}
-    </section>
+    </section>}
 
-    <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void createFromComposer(); }}><input value={composer} onChange={(event) => { const next = event.target.value; if (composer.trim() && !next.trim()) setComposerRequestId(crypto.randomUUID()); setComposer(next); }} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>
+    {view !== "account" && <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void createFromComposer(); }}><input value={composer} onChange={(event) => { const next = event.target.value; if (composer.trim() && !next.trim()) setComposerRequestId(crypto.randomUUID()); setComposer(next); }} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>}
     {undoAction && <div className="undo-toast" role="status"><Check size={16} /><span>“{undoAction.title}”已完成</span><button onClick={() => void undoCompletion()}><RotateCcw size={14} />撤销</button></div>}
-    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} onClose={() => setSelected(null)} onCreate={create} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
+    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} isIdentityActive={activeIdentity} onClose={() => setSelected(null)} onCreate={create} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
     {viewer && <ImageViewer attachments={viewer.attachments} initialIndex={viewer.index} onClose={() => setViewer(null)} />}
   </main>;
 }
@@ -775,10 +822,11 @@ function PendingPreview({ file, onRemove }: { file: File; onRemove: () => void }
   return <figure className="pending-preview">{url && <img src={url} alt={file.name} />}<figcaption title={file.name}>{file.name}</figcaption><button type="button" onClick={onRemove} aria-label={`移除 ${file.name}`}><X size={14} /></button></figure>;
 }
 
-function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
+function Editor({ userId, card, saving, isIdentityActive, onClose, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
   userId: string;
   card: CardRecord | null;
   saving: boolean;
+  isIdentityActive: () => boolean;
   onClose: () => void;
   onCreate: (title: string, stage: Stage, files: File[], details: CardCreateDetails, clientRequestId: string) => Promise<CardRecord | undefined>;
   onSave: (id: number, patch: CardPatch, clearDraftOnConfirm?: boolean) => Promise<CardSaveResult>;
@@ -807,6 +855,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (!isIdentityActive()) return;
     const dirty = title !== (card?.title ?? "")
       || criteria !== (card?.criteria ?? "")
       || result !== (card?.result ?? "")
@@ -833,7 +882,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
       });
     } else clearCardDraft(userId, draftId);
     onDraftStateChange(dirty || pendingFiles.length > 0);
-  }, [aiAnalysis, aiModel, aiOrganizedAt, aiPromptVersion, card, criteria, draftId, onDraftStateChange, originalText, organizedText, pendingFiles.length, result, stage, title, userId]);
+  }, [aiAnalysis, aiModel, aiOrganizedAt, aiPromptVersion, card, criteria, draftId, isIdentityActive, onDraftStateChange, originalText, organizedText, pendingFiles.length, result, stage, title, userId]);
 
   const addFiles = (files: File[]) => {
     if (window.matchMedia("(max-width: 720px)").matches) return;
@@ -873,7 +922,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
         const creation = onCreate(cleanTitle, targetStage, pendingFiles, details, clientRequestIdRef.current);
         if (pendingFiles.length === 0) onClose();
         const created = await creation;
-        if (!created) return;
+        if (!created || !isIdentityActive()) return;
       } else {
         const patch: CardPatch = {};
         if (cleanTitle !== card.title) patch.title = cleanTitle;
@@ -887,12 +936,14 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
         if (aiOrganizedAt !== card.aiOrganizedAt) patch.aiOrganizedAt = aiOrganizedAt;
         if (targetStage !== card.stage) patch.stage = targetStage;
         const save = await onSave(card.id, patch, true);
-        if (save.state === "pending") return;
+        if (save.state === "pending" || !isIdentityActive()) return;
         if (pendingFiles.length) {
           const failed = await onUploadFiles(card.id, pendingFiles);
+          if (!isIdentityActive()) return;
           if (failed.length) { setPendingFiles(failed); return; }
         }
       }
+      if (!isIdentityActive()) return;
       clearCardDraft(userId, draftId);
       onDraftStateChange(false);
       onClose();
@@ -901,6 +952,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
     }
   };
   const cancel = () => {
+    if (!isIdentityActive()) return;
     if (!card && (title.trim() || originalText.trim())) {
       writeCardDraft(userId, draftId, {
         title, criteria, result, originalText, organizedText, aiAnalysis, aiModel,
@@ -931,6 +983,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
   const downloadAttachment = async (attachment: AttachmentRecord) => {
     try {
       const url = await getBoardAttachmentUrl(attachment, true);
+      if (!isIdentityActive()) return;
       const anchor = document.createElement("a");
       anchor.href = url;
       anchor.download = attachment.filename;
@@ -938,7 +991,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-    } catch (reason) { setAttachmentError(reason instanceof Error ? reason.message : "下载失败"); }
+    } catch (reason) { if (isIdentityActive()) setAttachmentError(reason instanceof Error ? reason.message : "下载失败"); }
   };
   const advance = nextStage(stage);
 

@@ -1,62 +1,186 @@
 import { KeyRound, LoaderCircle, LockKeyhole, Mail, RefreshCw, Sparkles } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
-import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { AuthChangeEvent, Session, SupabaseClient } from "@supabase/supabase-js";
+import type { SignOutRequest } from "@/app/components/AccountPanel";
 import { IdeaBoard } from "@/app/components/IdeaBoard";
-import { withTimeout } from "@/lib/local-state";
-import { supabase } from "@/lib/supabase-client";
+import { clearAttachmentUrlCache } from "@/lib/supabase-board";
+import { clearUserLocalState, readRememberedEmail, setRememberedLogin, withTimeout } from "@/lib/local-state";
+import { configureSupabaseAuthMode, getSupabaseAuthMode, supabase } from "@/lib/supabase-client";
+import type { AuthStorageMode } from "@/lib/supabase-client";
 
 export default function App() {
-  const client = supabase;
+  const [client, setClient] = useState<SupabaseClient | null>(() => supabase);
+  const [authMode, setAuthMode] = useState<AuthStorageMode>(() => getSupabaseAuthMode());
   const [session, setSession] = useState<Session | null>(null);
+  const sessionRef = useRef<Session | null>(null);
   const [loading, setLoading] = useState(Boolean(client));
   const [authError, setAuthError] = useState("");
   const [recovery, setRecovery] = useState(false);
+  const activeClientRef = useRef<SupabaseClient | null>(client);
+  const authGenerationRef = useRef(0);
+  const sessionRevisionRef = useRef(0);
+  const identityGenerationRef = useRef(0);
+  const [identityGeneration, setIdentityGeneration] = useState(0);
+  const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
+
+  const commitSession = useCallback((nextSession: Session | null) => {
+    if (sessionRef.current?.user.id !== nextSession?.user.id) {
+      identityGenerationRef.current += 1;
+      setIdentityGeneration(identityGenerationRef.current);
+    }
+    sessionRef.current = nextSession;
+    setSession(nextSession);
+  }, []);
 
   const loadSession = useCallback(async () => {
-    if (!client) return;
+    const target = activeClientRef.current;
+    if (!target) return;
+    // A direct sign-in or newer auth event is already authoritative. Starting a
+    // restoration read afterwards would let its older snapshot clear that user.
+    if (sessionRef.current) {
+      setLoading(false);
+      return;
+    }
+    const generation = authGenerationRef.current;
+    const revision = sessionRevisionRef.current;
     setLoading(true);
     setAuthError("");
     try {
-      const { data, error } = await withTimeout(client.auth.getSession(), 10_000, "登录状态检查超时");
+      const { data, error } = await withTimeout(target.auth.getSession(), 10_000, "登录状态检查超时");
       if (error) throw error;
-      setSession(data.session);
+      if (activeClientRef.current !== target
+        || authGenerationRef.current !== generation
+        || sessionRevisionRef.current !== revision) return;
+      commitSession(data.session);
     } catch (reason) {
-      setAuthError(reason instanceof Error ? reason.message : "无法确认登录状态");
+      if (activeClientRef.current === target
+        && authGenerationRef.current === generation
+        && sessionRevisionRef.current === revision) {
+        setAuthError(reason instanceof Error ? reason.message : "无法确认登录状态");
+      }
     } finally {
-      setLoading(false);
+      if (activeClientRef.current === target && authGenerationRef.current === generation) setLoading(false);
     }
-  }, [client]);
+  }, [commitSession]);
 
   useEffect(() => {
     if (!client) return;
-    // Initial auth restoration must run when the configured client becomes available.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadSession();
+    const generation = authGenerationRef.current;
     const { data: listener } = client.auth.onAuthStateChange((event: AuthChangeEvent, nextSession) => {
-      setSession(nextSession);
+      if (activeClientRef.current !== client || authGenerationRef.current !== generation) return;
+      sessionRevisionRef.current += 1;
+      if (event === "SIGNED_OUT") setRecovery(false);
+      else if (nextSession?.user.id !== sessionRef.current?.user.id && event !== "PASSWORD_RECOVERY") setRecovery(false);
+      commitSession(nextSession);
       setLoading(false);
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
     });
-    return () => listener.subscription.unsubscribe();
-  }, [client, loadSession]);
+    subscriptionRef.current = listener.subscription;
+    // Subscribe before restoration so a newer auth event invalidates its snapshot.
+    void loadSession();
+    return () => {
+      listener.subscription.unsubscribe();
+      if (subscriptionRef.current === listener.subscription) subscriptionRef.current = null;
+    };
+  }, [client, commitSession, loadSession]);
+
+  const selectAuthMode = useCallback(async (mode: AuthStorageMode) => {
+    if (mode === authMode && activeClientRef.current) return activeClientRef.current;
+    const generation = authGenerationRef.current + 1;
+    authGenerationRef.current = generation;
+    sessionRevisionRef.current += 1;
+    subscriptionRef.current?.unsubscribe();
+    subscriptionRef.current = null;
+    commitSession(null);
+    setRecovery(false);
+    setAuthError("");
+    setLoading(true);
+    const nextClient = await configureSupabaseAuthMode(mode);
+    if (authGenerationRef.current !== generation) return nextClient;
+    activeClientRef.current = nextClient;
+    setAuthMode(mode);
+    setClient(nextClient);
+    setLoading(Boolean(nextClient));
+    return nextClient;
+  }, [authMode, commitSession]);
+
+  const acceptSignedInSession = useCallback((source: SupabaseClient, nextSession: Session) => {
+    if (activeClientRef.current !== source) return;
+    sessionRevisionRef.current += 1;
+    commitSession(nextSession);
+    setAuthError("");
+    setLoading(false);
+  }, [commitSession]);
+
+  const updatePassword = useCallback(async (password: string) => {
+    const target = activeClientRef.current;
+    if (!target) throw new Error("登录状态已失效");
+    const { error } = await target.auth.updateUser({ password });
+    if (error) throw error;
+  }, []);
+
+  const signOut = useCallback(async (request: SignOutRequest) => {
+    const target = activeClientRef.current;
+    const userId = sessionRef.current?.user.id;
+    if (!target || !userId) throw new Error("登录状态已失效");
+    const generation = authGenerationRef.current;
+    setAuthError("");
+    try {
+      const { error } = await target.auth.signOut({ scope: request.scope });
+      if (error) throw error;
+      if (activeClientRef.current !== target || authGenerationRef.current !== generation) return;
+      const currentUserId = sessionRef.current?.user.id;
+      // A newer identity on the same client owns the UI now. Do not let the
+      // earlier account's logout completion sign it out or clear its state.
+      if (currentUserId && currentUserId !== userId) return;
+      if (currentUserId === userId) {
+        sessionRevisionRef.current += 1;
+        setRecovery(false);
+        commitSession(null);
+      }
+      if (request.clearLocalData) {
+        clearUserLocalState(userId);
+        clearAttachmentUrlCache();
+      }
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "退出失败";
+      const currentUserId = sessionRef.current?.user.id;
+      if (activeClientRef.current === target
+        && authGenerationRef.current === generation
+        && (!currentUserId || currentUserId === userId)) setAuthError(message);
+      throw reason instanceof Error ? reason : new Error(message);
+    }
+  }, [commitSession]);
 
   if (!client) return <ConfigurationNeeded />;
   if (loading) return <AuthLoading />;
   if (authError && !session) return <AuthFailure message={authError} onRetry={() => void loadSession()} />;
   if (recovery && session) return <UpdatePassword client={client} onDone={() => setRecovery(false)} />;
-  if (!session) return <SignIn client={client} />;
+  if (!session) return <SignIn client={client} authMode={authMode} onSelectMode={selectAuthMode} onSignedIn={acceptSignedInSession} />;
+  const boardGeneration = identityGeneration;
   return <IdeaBoard
     // Reset private component state only when identity changes, not on token refresh.
     key={session.user.id}
     userId={session.user.id}
     displayName={session.user.email ?? "我"}
-    onSignOut={() => void client.auth.signOut()}
+    authMode={authMode}
+    isIdentityActive={() => identityGenerationRef.current === boardGeneration
+      && sessionRef.current?.user.id === session.user.id}
+    onUpdatePassword={updatePassword}
+    onSignOut={signOut}
   />;
 }
 
-function SignIn({ client }: { client: NonNullable<typeof supabase> }) {
-  const [email, setEmail] = useState("");
+function SignIn({ client, authMode, onSelectMode, onSignedIn }: {
+  client: SupabaseClient;
+  authMode: AuthStorageMode;
+  onSelectMode: (mode: AuthStorageMode) => Promise<SupabaseClient | null>;
+  onSignedIn: (client: SupabaseClient, session: Session) => void;
+}) {
+  const rememberedEmail = readRememberedEmail();
+  const [email, setEmail] = useState(rememberedEmail);
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(() => authMode === "persistent");
   const [sending, setSending] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -65,9 +189,20 @@ function SignIn({ client }: { client: NonNullable<typeof supabase> }) {
     if (!email.trim() || !password) return;
     setSending(true);
     setMessage("");
-    const { error } = await client.auth.signInWithPassword({ email: email.trim(), password });
-    setSending(false);
-    if (error) setMessage(error.message === "Invalid login credentials" ? "邮箱或密码不正确" : error.message);
+    try {
+      const targetMode: AuthStorageMode = remember ? "persistent" : "session";
+      const target = targetMode === authMode ? client : await onSelectMode(targetMode);
+      if (!target) throw new Error("尚未配置 Supabase");
+      const { data, error } = await target.auth.signInWithPassword({ email: email.trim(), password });
+      if (error) throw error;
+      setRememberedLogin(email, remember);
+      if (data.session) onSignedIn(target, data.session);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "登录失败";
+      setMessage(message === "Invalid login credentials" ? "邮箱或密码不正确" : message);
+    } finally {
+      setSending(false);
+    }
   };
   const resetPassword = async () => {
     if (!email.trim()) {
@@ -88,6 +223,7 @@ function SignIn({ client }: { client: NonNullable<typeof supabase> }) {
     <form onSubmit={submit}>
       <label><span>邮箱</span><div className="auth-input"><Mail size={16} /><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" required /></div></label>
       <label><span>密码</span><div className="auth-input"><LockKeyhole size={16} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="输入密码" autoComplete="current-password" required /></div></label>
+      <label className="remember-login"><input type="checkbox" checked={remember} onChange={(event) => { const checked = event.target.checked; setRemember(checked); if (!checked) setRememberedLogin(email, false); }} /><span>在这台设备保持登录</span><small>仅建议在私人设备上启用</small></label>
       <button className="primary" disabled={sending}>{sending ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />}登录</button>
       <button className="auth-link" type="button" disabled={sending} onClick={() => void resetPassword()}>忘记密码</button>
     </form>{message && <p className="auth-message" role="status">{message}</p>}

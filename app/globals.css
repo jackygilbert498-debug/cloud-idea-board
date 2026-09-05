@@ -37,7 +37,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .sync-offline .sync-status { color: #8c7667; }
 .sync-draft .sync-status { color: #6c72a4; }
 .sync-synced .sync-status { color: #568673; }
-.avatar { margin-left: 5px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: #edf1f6; color: #5b6676; font-weight: 650; }
+.avatar { margin-left: 5px; width: 28px; height: 28px; padding: 0; border: 0; display: grid; place-items: center; border-radius: 50%; background: #edf1f6; color: #5b6676; font-weight: 650; cursor: pointer; }
 .signout { margin-left: 2px; border: 0; background: transparent; color: #99a2ae; font-size: 10px; cursor: pointer; }
 .mobile-menu-button, .mobile-menu, .mobile-tabs, .mobile-composer { display: none; }
 
@@ -256,9 +256,36 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .auth-input:focus-within { border-color: #bcc8e9; box-shadow: 0 0 0 3px #f0f3fc; }
 .auth-input input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); font-size: 11px; }
 .auth-card form .primary { width: 100%; margin-top: 14px; }
+.auth-card .remember-login { display: grid; grid-template-columns: 16px 1fr; align-items: center; column-gap: 7px; }
+.auth-card .remember-login input { grid-row: 1 / span 2; margin: 0; accent-color: var(--accent); }
+.auth-card .remember-login > span { margin: 0; }
+.auth-card .remember-login small { color: #9ba3af; font-size: 8px; }
 .auth-link { width: 100%; margin-top: 10px; border: 0; background: transparent; color: #7d88a3; cursor: pointer; font-size: 9px; }
 .auth-message { margin-top: 13px !important; color: #657a9c; font-size: 10px; }
 .auth-retry { width: 100%; margin-top: 18px; }
+
+.account-workspace { width: min(880px, calc(100% - 68px)); }
+.account-panel { display: grid; gap: 15px; }
+.account-summary, .account-section { border: 1px solid var(--line); border-radius: 13px; background: white; }
+.account-summary { min-height: 112px; padding: 22px 24px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 15px; }
+.account-panel-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: var(--accent-soft); color: var(--accent); }
+.account-summary h1 { margin: 0 0 5px; font-size: 22px; letter-spacing: -.035em; }
+.account-summary p { margin: 0; color: var(--muted); font-size: 11px; }
+.session-mode { min-height: 31px; padding: 0 10px; border-radius: 8px; background: #f3f6f4; color: #5f8172; display: inline-flex; align-items: center; gap: 6px; font-size: 9px; }
+.account-section { padding: 22px 24px; display: grid; grid-template-columns: minmax(210px, .8fr) minmax(320px, 1.2fr); gap: 32px; }
+.account-section h2 { margin: 0 0 6px; font-size: 14px; }
+.account-section p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.account-password-form { display: grid; gap: 10px; }
+.account-password-form label { display: grid; gap: 6px; color: #6e7888; font-size: 9px; }
+.account-password-form input { width: 100%; height: 39px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; outline: 0; }
+.account-password-form input:focus { border-color: #bcc8e9; box-shadow: 0 0 0 3px #f0f3fc; }
+.account-password-form .primary { justify-self: end; margin-top: 2px; }
+.account-actions { display: grid; gap: 8px; }
+.account-actions button { min-height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; background: white; color: #687283; display: flex; align-items: center; gap: 7px; cursor: pointer; font-size: 10px; }
+.account-actions button:disabled { opacity: .5; cursor: default; }
+.account-actions button.danger { border-color: #ecd8d4; color: var(--danger); background: #fff9f7; }
+.account-panel-message { margin: 0; padding: 11px 13px; border-radius: 9px; background: #f3f6f4; color: #5f8172; font-size: 10px; }
+.account-panel-message.error { background: #fff9f7; color: var(--danger); }
 
 @media (max-width: 1050px) {
   .workspace { width: calc(100% - 34px); }
@@ -286,6 +313,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .mobile-tabs b { color: #a0a7b2; font-size: 7px; font-weight: 500; }
   .mobile-tabs .stage-dot { width: 5px; height: 5px; }
   .workspace { width: 100%; padding: 21px 13px 115px; }
+  .account-workspace { padding-bottom: 35px; }
+  .account-summary { min-height: 0; padding: 17px; grid-template-columns: auto 1fr; }
+  .account-summary .session-mode { grid-column: 1 / -1; justify-self: stretch; justify-content: center; }
+  .account-section { padding: 17px; grid-template-columns: 1fr; gap: 16px; }
+  .account-password-form .primary { width: 100%; }
   .heading-row { margin-bottom: 16px; }
   .eyebrow { display: none; }
   .heading-row h1 { font-size: 19px; margin-bottom: 4px; }

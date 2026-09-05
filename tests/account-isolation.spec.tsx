@@ -11,6 +11,7 @@ import type { AttachmentRecord, CardPatch, CardRecord } from "@/lib/types";
 const auth = vi.hoisted(() => ({
   listener: null as null | ((event: AuthChangeEvent, session: Session | null) => void),
   session: null as Session | null,
+  signOutCalls: [] as Array<{ scope: "local" | "global" }>,
 }));
 const board = vi.hoisted(() => ({
   cards: [] as CardRecord[],
@@ -20,20 +21,35 @@ const board = vi.hoisted(() => ({
   updateCalls: 0,
   updatePatches: [] as CardPatch[],
   upload: null as null | ((cardId: number, file: File) => Promise<void>),
+  uploadCalls: 0,
   reorder: null as null | ((cardId: number, ids: string[]) => Promise<void>),
   remove: null as null | ((attachment: AttachmentRecord) => Promise<void>),
+  create: null as null | (() => Promise<CardRecord>),
+  createCalls: 0,
 }));
 // Remote boundaries are replaced; App, IdeaBoard and the local draft/cache path are real.
-vi.mock("@/lib/supabase-client", () => ({
-  supabase: { auth: {
+vi.mock("@/lib/supabase-client", () => {
+  const client = { auth: {
     getSession: async () => ({ data: { session: auth.session }, error: null }),
     onAuthStateChange: (listener: typeof auth.listener) => {
       auth.listener = listener;
       return { data: { subscription: { unsubscribe() {} } } };
     },
-  } },
-  requireSupabase: () => { throw new Error("Unexpected network access in offline test"); },
-}));
+    updateUser: async () => ({ error: null }),
+    signOut: async (request: { scope: "local" | "global" }) => {
+      auth.signOutCalls.push(request);
+      auth.listener?.("SIGNED_OUT", null);
+      return { error: null };
+    },
+    dispose: async () => undefined,
+  } };
+  return {
+    supabase: client,
+    getSupabaseAuthMode: () => "persistent",
+    configureSupabaseAuthMode: async () => client,
+    requireSupabase: () => { throw new Error("Unexpected network access in offline test"); },
+  };
+});
 vi.mock("@/lib/supabase-board", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/supabase-board")>();
   return {
@@ -51,6 +67,7 @@ vi.mock("@/lib/supabase-board", async (importOriginal) => {
       return { ...known, ...patch, updatedAt: "2026-09-06T02:00:00Z" };
     },
     uploadBoardAttachment: async (cardId: number, file: File) => {
+      board.uploadCalls += 1;
       if (board.upload) await board.upload(cardId, file);
     },
     reorderBoardAttachments: async (cardId: number, ids: string[]) => {
@@ -58,6 +75,10 @@ vi.mock("@/lib/supabase-board", async (importOriginal) => {
     },
     deleteBoardAttachment: async (attachment: AttachmentRecord) => {
       if (board.remove) await board.remove(attachment);
+    },
+    createBoardCard: async () => {
+      board.createCalls += 1;
+      return board.create ? board.create() : card();
     },
   };
 });
@@ -81,10 +102,14 @@ afterEach(async () => {
   board.updateCalls = 0;
   board.updatePatches = [];
   board.upload = null;
+  board.uploadCalls = 0;
   board.reorder = null;
   board.remove = null;
+  board.create = null;
+  board.createCalls = 0;
   auth.listener = null;
   auth.session = null;
+  auth.signOutCalls = [];
 });
 
 function card(patch: Partial<CardRecord> = {}): CardRecord {
@@ -179,6 +204,106 @@ test("switching accounts does not copy the previous user's composer into the new
   const before = composer();
   await act(async () => auth.listener!("TOKEN_REFRESHED", session("bob")));
   expect(composer()).toBe(before);
+});
+
+test("the account page is a fourth main view with the current identity and session mode", async () => {
+  await renderOnlineBoard();
+  const accountButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".desktop-nav button"))
+    .find((button) => button.textContent?.includes("账号"));
+  expect(accountButton).toBeDefined();
+
+  await act(async () => accountButton!.click());
+  expect(container.querySelector(".account-panel")?.textContent).toContain("alice@example.com");
+  expect(container.querySelector(".account-panel")?.textContent).toContain("此设备保持登录");
+  expect(container.textContent).not.toContain("团队成员");
+});
+
+test("a create promise finishing after clear-device logout cannot restore cache or clear a newer draft", async () => {
+  const creation = deferred<CardRecord>();
+  board.create = () => creation.promise;
+  await renderOnlineBoard();
+  const composer = container.querySelector<HTMLInputElement>(".mobile-composer input")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(composer, "迟到的构思");
+    composer.dispatchEvent(new Event("input", { bubbles: true }));
+    container.querySelector<HTMLFormElement>(".mobile-composer")!.requestSubmit();
+    await Promise.resolve();
+  });
+  expect(board.createCalls).toBe(1);
+
+  const accountButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".desktop-nav button"))
+    .find((button) => button.textContent?.includes("账号"))!;
+  await act(async () => accountButton.click());
+  const clearButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".account-panel button"))
+    .find((button) => button.textContent?.includes("退出并清除本机数据"))!;
+  await act(async () => {
+    clearButton.click();
+    await Promise.resolve();
+  });
+  const newerDraft = JSON.stringify({ title: "Alice 登录后的新草稿" });
+  localStorage.setItem(draftKey("alice", "composer"), newerDraft);
+
+  await act(async () => {
+    creation.resolve(card({ title: "迟到的构思" }));
+    await Promise.resolve();
+  });
+  expect(localStorage.getItem(boardCacheKey("alice"))).toBeNull();
+  expect(localStorage.getItem(draftKey("alice", "composer"))).toBe(newerDraft);
+  expect(auth.signOutCalls).toEqual([{ scope: "local" }]);
+});
+
+test("a load snapshot finishing after clear-device logout cannot restore the cleared board", async () => {
+  localStorage.setItem(boardCacheKey("alice"), JSON.stringify([card()]));
+  const listing = deferred<CardRecord[]>();
+  board.list = () => listing.promise;
+  await renderOnlineBoard();
+  const accountButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".desktop-nav button"))
+    .find((button) => button.textContent?.includes("账号"))!;
+  await act(async () => accountButton.click());
+  const clearButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".account-panel button"))
+    .find((button) => button.textContent?.includes("退出并清除本机数据"))!;
+  await act(async () => {
+    clearButton.click();
+    await Promise.resolve();
+  });
+
+  await act(async () => {
+    listing.resolve([card({ title: "退出前的旧快照" })]);
+    await Promise.resolve();
+  });
+  expect(localStorage.getItem(boardCacheKey("alice"))).toBeNull();
+});
+
+test("an upload finishing after clear-device logout cannot start a reload that restores cache", async () => {
+  board.cards = [card()];
+  const upload = deferred<void>();
+  board.upload = () => upload.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, "files", {
+    configurable: true,
+    value: [new File(["png"], "late.png", { type: "image/png" })],
+  });
+  await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+  await vi.waitFor(() => expect(board.uploadCalls).toBe(1));
+  await act(async () => container.querySelector<HTMLButtonElement>('.editor [aria-label="关闭"]')!.click());
+  const accountButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".desktop-nav button"))
+    .find((button) => button.textContent?.includes("账号"))!;
+  await act(async () => accountButton.click());
+  const clearButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".account-panel button"))
+    .find((button) => button.textContent?.includes("退出并清除本机数据"))!;
+  await act(async () => {
+    clearButton.click();
+    await Promise.resolve();
+  });
+
+  await act(async () => {
+    upload.resolve();
+    await Promise.resolve();
+  });
+  expect(localStorage.getItem(boardCacheKey("alice"))).toBeNull();
 });
 
 test("a confirmed editor save clears its draft and closes the editor", async () => {
