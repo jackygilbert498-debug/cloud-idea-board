@@ -116,7 +116,7 @@ for each statement execute function public.lock_attachment_consistency();
 
 drop trigger if exists cards_lock_attachment_consistency on public.cards;
 create trigger cards_lock_attachment_consistency
-before update of user_id or delete on public.cards
+before insert or update of user_id, focus, archived or delete on public.cards
 for each statement execute function public.lock_attachment_consistency();
 
 create or replace function public.track_original_text_updated_at()
@@ -170,6 +170,11 @@ declare
   old_owner_lock bigint;
   new_owner_lock bigint;
 begin
+  -- Global board lock always precedes per-owner locks.
+  perform pg_advisory_xact_lock(
+    hashtextextended('cloud-memo-board/attachment-consistency', 0)
+  );
+
   new_active := new.focus and not new.archived;
   old_active := tg_op = 'UPDATE' and old.focus and not old.archived;
 

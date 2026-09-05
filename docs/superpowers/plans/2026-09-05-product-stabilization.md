@@ -501,6 +501,10 @@ Generate one diff package from merge base to HEAD. Review spec compliance, secur
 
 Record migration state without printing values; apply `202609050001_product_stabilization.sql` once through the authorized Supabase channel; set `DEEPSEEK_MODEL=deepseek-v4-flash` and required public/function variables with correct Netlify scopes. If authorization is unavailable, mark these steps `pending_external` and do not claim the feature deployed.
 
+- [ ] **Step 5A: Pass the blocking two-session database concurrency gate**
+
+Against the migrated preview PostgreSQL/Supabase database, use at least two independent network sessions (not PGlite) to run controlled competing transactions. Verify that simultaneous focus acquisition or active-owner transfer leaves at most three active focus cards for one user; parallel quota calls produce exactly `p_limit` successes and reject every excess call; and attachment reorder competing with `pending → ready`, `ready → deleting` or delete serializes without deadlock and leaves the ready ID set and `sort_order` consistent. Record sanitized transaction timing, outcomes and final queries without credentials or user content. If this gate cannot run or any invariant fails, mark it `pending_external`, stop before production publication and do not treat local deterministic tests as a substitute.
+
 - [ ] **Step 6: Deploy fixed preview and perform browser acceptance**
 
 Deploy the exact verified `dist` plus functions to a fixed preview alias. Verify HTTP headers, SPA route, login, remembered/non-remembered session, account controls, create/save/refresh, delayed save reconciliation, focus limit, screenshot lifecycle, AI organize/adopt, logout retention and logout clear at desktop and 393px mobile. Check console and network failures.

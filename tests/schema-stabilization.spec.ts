@@ -107,6 +107,14 @@ function createDatabase() {
   return new PGlite({ extensions: { pgcrypto } });
 }
 
+function normalizeSqlDefinition(value: string | null) {
+  if (value === null) return null;
+  return value
+    .replace(/--.*$/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function installAuthAndStorageFixtures(db: PGlite) {
   await db.exec(`
     create role anon nologin;
@@ -160,6 +168,10 @@ async function installLegacyUpgrade(db: PGlite) {
   await db.exec(stabilizationMigration);
 }
 
+async function installFreshSchema(db: PGlite) {
+  await db.exec(schema);
+}
+
 async function readStabilizationCatalog(db: PGlite) {
   const columns = (await db.query<{
     table_name: string;
@@ -177,58 +189,70 @@ async function readStabilizationCatalog(db: PGlite) {
     proname: string;
     prosecdef: boolean;
     empty_search_path: boolean;
+    definition: string;
   }>(`
     select proname, prosecdef,
-      coalesce('search_path=""' = any(proconfig), false) as empty_search_path
+      coalesce('search_path=""' = any(proconfig), false) as empty_search_path,
+      pg_get_functiondef(oid) as definition
     from pg_proc
     where pronamespace = 'public'::regnamespace
       and proname in (
         'consume_ai_daily_quota',
+        'enforce_focus_limit',
         'lock_attachment_consistency',
         'reorder_attachments'
       )
     order by proname;
-  `)).rows;
+  `)).rows.map((row) => ({ ...row, definition: normalizeSqlDefinition(row.definition) }));
   const triggers = (await db.query<{
     table_name: string;
     trigger_name: string;
-    events: string;
-    orientation: string;
+    definition: string;
   }>(`
-    select event_object_table as table_name,
-      trigger_name,
-      string_agg(event_manipulation, ',' order by event_manipulation) as events,
-      action_orientation as orientation
-    from information_schema.triggers
-    where trigger_schema = 'public'
-      and trigger_name in (
+    select relation.relname as table_name,
+      trigger.tgname as trigger_name,
+      pg_get_triggerdef(trigger.oid, true) as definition
+    from pg_trigger as trigger
+    join pg_class as relation on relation.oid = trigger.tgrelid
+    where relation.relnamespace = 'public'::regnamespace
+      and not trigger.tgisinternal
+      and trigger.tgname in (
         'attachments_lock_consistency',
         'attachments_touch_updated_at',
         'cards_enforce_focus_limit',
         'cards_lock_attachment_consistency'
       )
-    group by event_object_table, trigger_name, action_orientation
-    order by event_object_table, trigger_name;
-  `)).rows;
-  const indexes = (await db.query<{ indexname: string }>(`
-    select indexname
+    order by relation.relname, trigger.tgname;
+  `)).rows.map((row) => ({ ...row, definition: normalizeSqlDefinition(row.definition) }));
+  const indexes = (await db.query<{ indexname: string; indexdef: string }>(`
+    select indexname, indexdef
     from pg_indexes
     where schemaname = 'public'
       and indexname = 'cards_owner_client_request_idx';
-  `)).rows;
+  `)).rows.map((row) => ({ ...row, indexdef: normalizeSqlDefinition(row.indexdef) }));
   const relations = (await db.query<{ relname: string; relrowsecurity: boolean }>(`
     select relname, relrowsecurity
     from pg_class
     where relnamespace = 'public'::regnamespace
       and relname = 'ai_usage_daily';
   `)).rows;
-  const policies = (await db.query<{ tablename: string; policyname: string; cmd: string }>(`
-    select tablename, policyname, cmd
+  const policies = (await db.query<{
+    tablename: string;
+    policyname: string;
+    cmd: string;
+    qual: string | null;
+    with_check: string | null;
+  }>(`
+    select tablename, policyname, cmd, qual, with_check
     from pg_policies
     where schemaname = 'public'
       and tablename = 'attachments'
     order by policyname;
-  `)).rows;
+  `)).rows.map((row) => ({
+    ...row,
+    qual: normalizeSqlDefinition(row.qual),
+    with_check: normalizeSqlDefinition(row.with_check),
+  }));
   const privileges = (await db.query<{
     authenticated: boolean;
     anon: boolean;
@@ -308,24 +332,96 @@ test("fresh schema and the independent legacy upgrade converge and rerun safely"
 
     const freshCatalog = await readStabilizationCatalog(freshDb);
     expect(await readStabilizationCatalog(upgradedDb)).toEqual(freshCatalog);
-    expect(freshCatalog.functions).toEqual([
+    expect(freshCatalog.functions.map(({ proname, prosecdef, empty_search_path }) => ({
+      proname,
+      prosecdef,
+      empty_search_path,
+    }))).toEqual([
       { proname: "consume_ai_daily_quota", prosecdef: true, empty_search_path: true },
+      { proname: "enforce_focus_limit", prosecdef: false, empty_search_path: true },
       { proname: "lock_attachment_consistency", prosecdef: false, empty_search_path: true },
       { proname: "reorder_attachments", prosecdef: false, empty_search_path: true },
     ]);
-    expect(freshCatalog.triggers).toEqual([
-      { table_name: "attachments", trigger_name: "attachments_lock_consistency", events: "DELETE,INSERT,UPDATE", orientation: "STATEMENT" },
-      { table_name: "attachments", trigger_name: "attachments_touch_updated_at", events: "UPDATE", orientation: "ROW" },
-      { table_name: "cards", trigger_name: "cards_enforce_focus_limit", events: "INSERT,UPDATE", orientation: "ROW" },
-      { table_name: "cards", trigger_name: "cards_lock_attachment_consistency", events: "DELETE,UPDATE", orientation: "STATEMENT" },
+    expect(freshCatalog.triggers.map(({ table_name, trigger_name }) => ({ table_name, trigger_name }))).toEqual([
+      { table_name: "attachments", trigger_name: "attachments_lock_consistency" },
+      { table_name: "attachments", trigger_name: "attachments_touch_updated_at" },
+      { table_name: "cards", trigger_name: "cards_enforce_focus_limit" },
+      { table_name: "cards", trigger_name: "cards_lock_attachment_consistency" },
     ]);
-    expect(freshCatalog.indexes).toEqual([{ indexname: "cards_owner_client_request_idx" }]);
+    expect(freshCatalog.indexes.map(({ indexname }) => ({ indexname }))).toEqual([
+      { indexname: "cards_owner_client_request_idx" },
+    ]);
     expect(freshCatalog.relations).toEqual([{ relname: "ai_usage_daily", relrowsecurity: true }]);
     expect(freshCatalog.privileges).toEqual([{ authenticated: false, anon: false, service_role: true }]);
   } finally {
     await freshDb.close();
     await upgradedDb.close();
   }
+});
+
+describe.each([
+  { variant: "fresh", install: installFreshSchema },
+  { variant: "upgrade", install: installLegacyUpgrade },
+])("$variant schema behavior contract", ({ install }) => {
+  let contractDb: PGlite;
+
+  beforeEach(async () => {
+    contractDb = createDatabase();
+    await installAuthAndStorageFixtures(contractDb);
+    await install(contractDb);
+    await grantAuthenticatedTableAccess(contractDb);
+  });
+
+  afterEach(async () => {
+    await contractDb.close();
+  });
+
+  test("client request uniqueness is scoped to one owner", async () => {
+    await contractDb.exec(`
+      insert into public.cards (user_id, title, client_request_id)
+      values ('${ALICE_ID}', 'First attempt', '${REQUEST_ID}');
+    `);
+    await expect(contractDb.exec(`
+      insert into public.cards (user_id, title, client_request_id)
+      values ('${ALICE_ID}', 'Retry', '${REQUEST_ID}');
+    `)).rejects.toThrow(/unique|duplicate/i);
+    await expect(contractDb.exec(`
+      insert into public.cards (user_id, title, client_request_id)
+      values ('${BOB_ID}', 'Other owner', '${REQUEST_ID}');
+    `)).resolves.toBeDefined();
+  });
+
+  test("active owner transfer cannot create a fourth focus", async () => {
+    await seedThreeFocusedCards(contractDb);
+    await contractDb.exec(`
+      insert into public.cards (id, user_id, title, stage, focus)
+      values (100, '${BOB_ID}', 'Transferred focus', 'idea', true);
+    `);
+    await expect(contractDb.exec(`
+      update public.cards set user_id = '${ALICE_ID}' where id = 100;
+    `)).rejects.toThrow(/最多保留 3 条/);
+  });
+
+  test("attachment update checks both parent and object-key ownership", async () => {
+    await seedCards(contractDb);
+    await contractDb.exec(`
+      insert into public.attachments
+        (id, card_id, user_id, object_key, filename, content_type, size, state)
+      values
+        ('${ATTACHMENT_A_ID}', 1, '${ALICE_ID}', '${ALICE_ID}/a.png', 'a.png', 'image/png', 10, 'ready');
+    `);
+    await assumeRole(contractDb, "authenticated");
+    try {
+      await expect(contractDb.exec(`
+        update public.attachments set card_id = 2 where id = '${ATTACHMENT_A_ID}';
+      `)).rejects.toThrow(/row-level security/i);
+      await expect(contractDb.exec(`
+        update public.attachments set object_key = '${BOB_ID}/a.png' where id = '${ATTACHMENT_A_ID}';
+      `)).rejects.toThrow(/row-level security/i);
+    } finally {
+      await resetRole(contractDb);
+    }
+  });
 });
 
 describe("stabilized database invariants", () => {
@@ -393,10 +489,35 @@ describe("stabilized database invariants", () => {
         insert into public.cards (user_id, title, stage, focus)
         values ('${ALICE_ID}', 'Serialized focus', 'idea', true);
       `);
-      expect(await readAdvisoryLocks(db)).toHaveLength(1);
+      // The global consistency lock is acquired before the per-owner lock.
+      expect(await readAdvisoryLocks(db)).toHaveLength(2);
     } finally {
       await db.exec("rollback;");
     }
+  });
+
+  test("every focus path acquires the attachment mutex before owner locks", async () => {
+    const functionDefinition = normalizeSqlDefinition((await db.query<{ definition: string }>(`
+      select pg_get_functiondef(oid) as definition
+      from pg_proc
+      where pronamespace = 'public'::regnamespace
+        and proname = 'enforce_focus_limit';
+    `)).rows[0].definition);
+    expect(functionDefinition).not.toBeNull();
+    const attachmentLockPosition = functionDefinition!.indexOf("cloud-memo-board/attachment-consistency");
+    const ownerLockPosition = functionDefinition!.indexOf("hashtextextended(new.user_id::text, 0)");
+    expect(attachmentLockPosition).toBeGreaterThan(-1);
+    expect(ownerLockPosition).toBeGreaterThan(attachmentLockPosition);
+
+    const triggerDefinition = normalizeSqlDefinition((await db.query<{ definition: string }>(`
+      select pg_get_triggerdef(oid, true) as definition
+      from pg_trigger
+      where tgrelid = 'public.cards'::regclass
+        and tgname = 'cards_lock_attachment_consistency';
+    `)).rows[0].definition);
+    expect(triggerDefinition).toContain("BEFORE INSERT");
+    expect(triggerDefinition).toContain("DELETE");
+    expect(triggerDefinition).toContain("UPDATE OF user_id, focus, archived");
   });
 
   test("a client request id creates at most one card per user", async () => {
