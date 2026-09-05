@@ -39,6 +39,7 @@ import {
   deleteBoardAttachment,
   getBoardAttachmentUrl,
   listBoardCards,
+  reconcileBoardAttachments,
   reorderBoardAttachments,
   updateBoardCard,
   uploadBoardAttachment,
@@ -103,6 +104,8 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const cardsRef = useRef(cards);
   const mutationVersionRef = useRef(new Map<number, number>());
+  const composerRequestIdRef = useRef(crypto.randomUUID());
+  const editorRequestIdRef = useRef(crypto.randomUUID());
 
   const commitCards = useCallback((next: CardRecord[]) => {
     cardsRef.current = next;
@@ -127,6 +130,13 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     }
     setSyncState("syncing");
     try {
+      try {
+        await reconcileBoardAttachments();
+      } catch (reason) {
+        // Ready rows are still safe to load; stale operations stay hidden and
+        // will be retried on the next synchronization.
+        console.warn("未完成的截图操作暂未恢复，将在下次同步重试。", reason);
+      }
       const data = await withTimeout(listBoardCards(), LOAD_TIMEOUT, "同步超时，请检查网络后重试");
       commitCards(data);
       setSelected((current) => {
@@ -256,6 +266,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     stage: Stage = "idea",
     files: File[] = [],
     details: CardCreateDetails = {},
+    clientRequestId: string,
   ) => {
     const clean = title.trim();
     if (!clean && !details.originalText?.trim()) return undefined;
@@ -267,7 +278,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       files.forEach(validateBoardAttachment);
       // Creation is intentionally not force-timed-out: an insert can still finish after a
       // client timeout, and an automatic retry could otherwise create a duplicate memo.
-      createdCard = await createBoardCard(clean, stage, details, nextStageSortOrder(cardsRef.current, stage));
+      createdCard = await createBoardCard(clean, stage, details, clientRequestId, nextStageSortOrder(cardsRef.current, stage));
       const failed: string[] = [];
       for (const file of files) {
         try { await uploadBoardAttachment(createdCard.id, file); }
@@ -293,6 +304,22 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       setSaving(false);
     }
   }, [commitCard, load, userId]);
+
+  const createFromComposer = useCallback(async () => {
+    const created = await create(composer, "idea", [], {}, composerRequestIdRef.current);
+    if (created) composerRequestIdRef.current = crypto.randomUUID();
+  }, [composer, create]);
+
+  const createFromEditor = useCallback(async (
+    title: string,
+    stage: Stage = "idea",
+    files: File[] = [],
+    details: CardCreateDetails = {},
+  ) => {
+    const created = await create(title, stage, files, details, editorRequestIdRef.current);
+    if (created) editorRequestIdRef.current = crypto.randomUUID();
+    return created;
+  }, [create]);
 
   const removeAttachment = useCallback(async (attachment: AttachmentRecord) => {
     setSaving(true);
@@ -356,9 +383,9 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       {loading ? <LoadingState /> : view === "board" ? <Board cards={activeCards} mobileStage={mobileStage} onOpen={setSelected} onMove={(card, stage) => { void mutate(card.id, { stage }).catch(() => undefined); }} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} onOpenArchive={() => setView("archive")} /> : view === "archive" ? <ArchiveView groups={archiveGroups} onOpen={setSelected} onRestore={(card) => void restore(card)} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} /> : <ListView cards={listCards} onOpen={setSelected} />}
     </section>
 
-    <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void create(composer); }}><input value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>
+    <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void createFromComposer(); }}><input value={composer} onChange={(event) => { const next = event.target.value; if (composer.trim() && !next.trim()) composerRequestIdRef.current = crypto.randomUUID(); setComposer(next); }} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>
     {undoAction && <div className="undo-toast" role="status"><Check size={16} /><span>“{undoAction.title}”已完成</span><button onClick={() => void undoCompletion()}><RotateCcw size={14} />撤销</button></div>}
-    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} onClose={() => setSelected(null)} onCreate={create} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
+    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} onClose={() => setSelected(null)} onCancel={() => { editorRequestIdRef.current = crypto.randomUUID(); setSelected(null); }} onCreate={createFromEditor} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
     {viewer && <ImageViewer attachments={viewer.attachments} initialIndex={viewer.index} onClose={() => setViewer(null)} />}
   </main>;
 }
@@ -424,11 +451,12 @@ function PendingPreview({ file, onRemove }: { file: File; onRemove: () => void }
   return <figure className="pending-preview">{url && <img src={url} alt={file.name} />}<figcaption title={file.name}>{file.name}</figcaption><button type="button" onClick={onRemove} aria-label={`移除 ${file.name}`}><X size={14} /></button></figure>;
 }
 
-function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
+function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
   userId: string;
   card: CardRecord | null;
   saving: boolean;
   onClose: () => void;
+  onCancel: () => void;
   onCreate: (title: string, stage?: Stage, files?: File[], details?: CardCreateDetails) => Promise<CardRecord | undefined>;
   onSave: (id: number, patch: CardPatch) => Promise<CardRecord>;
   onUploadFiles: (id: number, files: File[]) => Promise<File[]>;
@@ -572,7 +600,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
   const advance = nextStage(stage);
 
   return <div className="editor-backdrop"><aside className="editor" role="dialog" aria-modal="true" aria-label={card ? "编辑记录" : "新建构思"} onPaste={pasteAttachment} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}>
-    <header><div><span className={`stage-dot ${stage}`} /><p>{card ? `#${String(card.id).padStart(4, "0")}` : "NEW IDEA"}</p></div><button onClick={onClose} aria-label="关闭"><X size={19} /></button></header>
+    <header><div><span className={`stage-dot ${stage}`} /><p>{card ? `#${String(card.id).padStart(4, "0")}` : "NEW IDEA"}</p></div><button onClick={onCancel} aria-label="关闭"><X size={19} /></button></header>
     <div className="editor-scroll">
       {restoredDraft && <div className="draft-restored"><FilePenLine size={14} />已恢复上次未保存的文字</div>}
       <label className="field title-field"><span>标题</span><textarea value={title} onChange={(event) => setTitle(event.target.value)} placeholder="记下你正在想的事…" maxLength={240} rows={2} /></label>

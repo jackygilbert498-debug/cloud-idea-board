@@ -3,6 +3,7 @@ export const STAGES = ["idea", "todo", "doing", "done"] as const;
 export type Stage = (typeof STAGES)[number];
 export type ActiveStage = Exclude<Stage, "done">;
 export type SyncState = "synced" | "syncing" | "offline" | "error" | "draft";
+export type AttachmentState = "pending" | "ready" | "deleting";
 
 export type IdeaCertainty = "explicit" | "inferred" | "uncertain";
 
@@ -42,6 +43,9 @@ export type AttachmentRecord = {
   contentType: string;
   size: number;
   sortOrder: number;
+  // Optional only for compatibility with local caches written before the state
+  // machine existed; every record mapped from Supabase carries an explicit state.
+  state?: AttachmentState;
   createdAt: string;
   url?: string;
 };
