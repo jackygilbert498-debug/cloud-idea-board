@@ -15,6 +15,7 @@ const BASE_ENV: NodeJS.ProcessEnv = {
   AI_DAILY_QUOTA_LIMIT: "20",
   COMMIT_REF: "deploy-sha-123",
 };
+const FUNCTION_CONTEXT = { requestId: "trusted-context-request-123" };
 const SILENT_LOGGER = {
   error: () => undefined,
   warn: () => undefined,
@@ -30,7 +31,6 @@ function ideaRequest(
     headers: {
       Authorization: `Bearer ${AUTH_TOKEN}`,
       "Content-Type": "application/json",
-      "X-Nf-Request-Id": "request-123",
       ...headers,
     },
     body,
@@ -41,18 +41,21 @@ function successfulDeepSeekResponse(): Response {
   return Response.json({
     choices: [{
       finish_reason: "stop",
-      message: { content: JSON.stringify({
-        suggestedTitle: "建议标题",
-        organizedText: "整理后的文字",
-        analysis: {
-          actions: [],
-          times: [],
-          people: [],
-          blockers: [],
-          uncertainties: [],
-          priority: { value: null },
-        },
-      }) },
+      message: {
+        reasoning_content: "reasoning-content-that-must-never-be-logged",
+        content: JSON.stringify({
+          suggestedTitle: "建议标题",
+          organizedText: "整理后的文字",
+          analysis: {
+            actions: [],
+            times: [],
+            people: [],
+            blockers: [],
+            uncertainties: [],
+            priority: { value: null },
+          },
+        }),
+      },
     }],
   });
 }
@@ -202,6 +205,7 @@ test("calls auth, atomic user quota and DeepSeek in order with the supported thi
   assert.equal(deepSeekBody?.reasoning_effort, "high");
   assert.deepEqual(deepSeekBody?.response_format, { type: "json_object" });
   assert.equal(deepSeekBody?.stream, false);
+  assert.equal(deepSeekBody?.max_tokens, 8_000);
   assert.equal("temperature" in (deepSeekBody ?? {}), false);
   assert.equal("top_p" in (deepSeekBody ?? {}), false);
   const messages = deepSeekBody?.messages as Array<{ role: string; content: string }>;
@@ -230,6 +234,44 @@ test("returns an account quota 429 without calling DeepSeek", async () => {
   assert.equal(response.status, 429);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "AI_QUOTA_EXHAUSTED");
   assert.deepEqual(calls, ["auth", "quota"]);
+});
+
+test("fails closed when a successful quota RPC does not return a consumed count", async (t) => {
+  const cases: Array<{ name: string; response: () => Response }> = [
+    { name: "null", response: () => Response.json(null) },
+    { name: "empty string", response: () => Response.json("") },
+    { name: "numeric string", response: () => Response.json("1") },
+    { name: "zero", response: () => Response.json(0) },
+    { name: "above limit", response: () => Response.json(21) },
+    { name: "fractional", response: () => Response.json(1.5) },
+    {
+      name: "invalid JSON",
+      response: () => new Response("{", { status: 200, headers: { "Content-Type": "application/json" } }),
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      let deepSeekCalls = 0;
+      const handler = createOrganizeIdeaHandler({
+        fetchImpl: (async (input) => {
+          const url = String(input);
+          if (url.endsWith("/auth/v1/user")) return Response.json({ id: "server-user-id" });
+          if (url.endsWith("/rest/v1/rpc/consume_ai_daily_quota")) return fixture.response();
+          deepSeekCalls += 1;
+          return successfulDeepSeekResponse();
+        }) as typeof fetch,
+        env: BASE_ENV,
+        logger: SILENT_LOGGER,
+      });
+
+      const response = await handler(ideaRequest());
+
+      assert.equal(response.status, 503);
+      assert.equal((await response.json() as { error: { code: string } }).error.code, "AI_QUOTA_UNAVAILABLE");
+      assert.equal(deepSeekCalls, 0);
+    });
+  }
 });
 
 test("distinguishes an upstream DeepSeek 429 from account quota exhaustion", async () => {
@@ -307,6 +349,24 @@ test("distinguishes truncated and invalid DeepSeek JSON responses", async (t) =>
   }
 });
 
+test("classifies an invalid outer DeepSeek response as invalid JSON", async () => {
+  const handler = createOrganizeIdeaHandler({
+    fetchImpl: (async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/v1/user")) return Response.json({ id: "server-user-id" });
+      if (url.endsWith("/rest/v1/rpc/consume_ai_daily_quota")) return Response.json(1);
+      return new Response("{", { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch,
+    env: BASE_ENV,
+    logger: SILENT_LOGGER,
+  });
+
+  const response = await handler(ideaRequest());
+
+  assert.equal(response.status, 502);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "AI_INVALID_RESPONSE");
+});
+
 test("adds no-store and request ID headers to success and error responses", async (t) => {
   const cases = [
     { name: "success", body: JSON.stringify({ originalText: ORIGINAL_TEXT }), expectedStatus: 200 },
@@ -326,13 +386,108 @@ test("adds no-store and request ID headers to success and error responses", asyn
         logger: SILENT_LOGGER,
       });
 
-      const response = await handler(ideaRequest(fixture.body));
+      const response = await handler(ideaRequest(fixture.body), FUNCTION_CONTEXT);
 
       assert.equal(response.status, fixture.expectedStatus);
       assert.equal(response.headers.get("cache-control"), "no-store");
-      assert.equal(response.headers.get("x-request-id"), "request-123");
+      assert.equal(response.headers.get("x-request-id"), "trusted-context-request-123");
     });
   }
+});
+
+test("never trusts a client request ID header and generates a server UUID without context", async () => {
+  const records: unknown[][] = [];
+  const logger = {
+    error: (...args: unknown[]) => records.push(args),
+    warn: (...args: unknown[]) => records.push(args),
+    info: (...args: unknown[]) => records.push(args),
+  };
+  const handler = createOrganizeIdeaHandler({
+    fetchImpl: (async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/v1/user")) return Response.json({ id: "server-user-id" });
+      if (url.endsWith("/rest/v1/rpc/consume_ai_daily_quota")) return Response.json(1);
+      return successfulDeepSeekResponse();
+    }) as typeof fetch,
+    env: BASE_ENV,
+    logger,
+  });
+
+  const response = await handler(ideaRequest(undefined, { "X-Nf-Request-Id": AUTH_TOKEN }));
+  const requestId = response.headers.get("x-request-id") ?? "";
+
+  assert.match(requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.notEqual(requestId, AUTH_TOKEN);
+  assert.doesNotMatch(JSON.stringify(records), new RegExp(AUTH_TOKEN));
+});
+
+test("caps each fetch by its phase limit and the remaining end-to-end deadline", async () => {
+  let clock = 0;
+  const budgets: number[] = [];
+  const handler = createOrganizeIdeaHandler({
+    fetchImpl: (async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/v1/user")) {
+        clock = 8_000;
+        return Response.json({ id: "server-user-id" });
+      }
+      if (url.endsWith("/rest/v1/rpc/consume_ai_daily_quota")) {
+        clock = 13_000;
+        return Response.json(1);
+      }
+      return successfulDeepSeekResponse();
+    }) as typeof fetch,
+    env: BASE_ENV,
+    logger: SILENT_LOGGER,
+    now: () => clock,
+    timeoutSignal: (milliseconds: number) => {
+      budgets.push(milliseconds);
+      return new AbortController().signal;
+    },
+  });
+
+  const response = await handler(ideaRequest(), FUNCTION_CONTEXT);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(budgets, [8_000, 5_000, 25_000]);
+  assert.ok(budgets.reduce((total, budget) => total + budget, 0) <= 38_000);
+});
+
+test("returns a safe JSON timeout before starting another phase after the deadline", async () => {
+  let clock = 0;
+  const calls: string[] = [];
+  const records: unknown[][] = [];
+  const logger = {
+    error: (...args: unknown[]) => records.push(args),
+    warn: (...args: unknown[]) => records.push(args),
+    info: (...args: unknown[]) => records.push(args),
+  };
+  const handler = createOrganizeIdeaHandler({
+    fetchImpl: (async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/v1/user")) {
+        calls.push("auth");
+        clock = 38_000;
+        return Response.json({ id: "server-user-id" });
+      }
+      calls.push("unexpected");
+      return Response.json(1);
+    }) as typeof fetch,
+    env: BASE_ENV,
+    logger,
+    now: () => clock,
+    timeoutSignal: () => new AbortController().signal,
+  });
+
+  const response = await handler(ideaRequest(), FUNCTION_CONTEXT);
+  const body = await response.json() as { error: { code: string } };
+
+  assert.equal(response.status, 504);
+  assert.equal(body.error.code, "AI_TIMEOUT");
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-request-id"), "trusted-context-request-123");
+  assert.deepEqual(calls, ["auth"]);
+  assert.equal((records[0][0] as { outcome: string }).outcome, "ai_timeout");
 });
 
 test("emits one structured log record containing only approved non-sensitive fields", async () => {
@@ -357,13 +512,13 @@ test("emits one structured log record containing only approved non-sensitive fie
     })(),
   });
 
-  const response = await handler(ideaRequest());
+  const response = await handler(ideaRequest(), FUNCTION_CONTEXT);
 
   assert.equal(response.status, 200);
   assert.equal(records.length, 1);
   assert.deepEqual(records[0], [{
     event: "organize_idea",
-    request_id: "request-123",
+    request_id: "trusted-context-request-123",
     deploy_sha: "deploy-sha-123",
     model: "deepseek-v4-pro",
     outcome: "success",
@@ -381,6 +536,13 @@ test("emits one structured log record containing only approved non-sensitive fie
   ]);
   assert.doesNotMatch(
     JSON.stringify(records),
-    new RegExp([ORIGINAL_TEXT, AUTH_TOKEN, SERVICE_KEY, DEEPSEEK_KEY, "secret@example.com"].join("|")),
+    new RegExp([
+      ORIGINAL_TEXT,
+      AUTH_TOKEN,
+      SERVICE_KEY,
+      DEEPSEEK_KEY,
+      "secret@example.com",
+      "reasoning-content-that-must-never-be-logged",
+    ].join("|")),
   );
 });
