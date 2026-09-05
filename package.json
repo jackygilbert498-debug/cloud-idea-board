@@ -13,7 +13,13 @@
     "test:regression": "vitest run",
     "test:unit": "node scripts/test-unit.mjs",
     "test:integration": "npm run build && node --test tests/netlify-build.test.mjs",
-    "lint": "eslint src app/components lib netlify/functions tests vite.config.ts"
+    "lint": "eslint src app/components lib netlify/functions tests vite.config.ts",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test:contracts": "node --test tests/release-pipeline.test.mjs",
+    "test:artifact": "node --test tests/netlify-build.test.mjs",
+    "verify": "npm run lint && npm run typecheck && npm run test:unit && npm run test:regression && npm run test:contracts",
+    "build:release": "node scripts/validate-release-env.mjs && vite build",
+    "verify:release": "npm run verify && npm run build:release && npm run test:artifact"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

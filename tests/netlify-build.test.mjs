@@ -1,64 +1,51 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import test from "node:test";
 
 const root = new URL("../", import.meta.url);
+const dist = new URL("../dist/", import.meta.url);
 
-test("ships a Netlify SPA entrypoint with the memo workflow capabilities", async () => {
-  const [netlifyConfig, viteConfig, app, board, media, organizer, aiFunction, model, dataLayer, schema, migration, aiMigration] = await Promise.all([
-    readFile(new URL("netlify.toml", root), "utf8"),
-    readFile(new URL("vite.config.ts", root), "utf8"),
-    readFile(new URL("src/App.tsx", root), "utf8"),
-    readFile(new URL("app/components/IdeaBoard.tsx", root), "utf8"),
-    readFile(new URL("app/components/AttachmentMedia.tsx", root), "utf8"),
-    readFile(new URL("app/components/IdeaOrganizer.tsx", root), "utf8"),
-    readFile(new URL("netlify/functions/organize-idea.mts", root), "utf8"),
-    readFile(new URL("lib/board-model.ts", root), "utf8"),
-    readFile(new URL("lib/supabase-board.ts", root), "utf8"),
-    readFile(new URL("supabase/schema.sql", root), "utf8"),
-    readFile(new URL("supabase/migrations/20260824_memo_flow.sql", root), "utf8"),
-    readFile(new URL("supabase/migrations/20260824_restore_ai_organizer.sql", root), "utf8"),
-  ]);
-  assert.match(netlifyConfig, /publish\s*=\s*"dist"/);
-  assert.match(netlifyConfig, /to\s*=\s*"\/index\.html"/);
-  assert.match(netlifyConfig, /directory\s*=\s*"netlify\/functions"/);
-  assert.match(viteConfig, /@vitejs\/plugin-react/);
-  assert.doesNotMatch(viteConfig, /cloudflare:workers|sites-vite-plugin|\.openai/);
-  assert.match(app, /signInWithPassword/);
-  assert.match(app, /登录状态检查超时/);
-  assert.match(model, /DONE_BOARD_LIMIT = 3/);
-  assert.match(model, /groupArchiveCards/);
-  assert.match(board, /card\.stage !== "done"/);
-  assert.match(board, /pendingFiles/);
-  assert.match(board, /clipboardData\.items/);
-  assert.match(board, /undoAction/);
-  assert.match(board, /本机草稿/);
-  assert.match(media, /截图加载失败/);
-  assert.match(media, /clearAttachmentUrlCache/);
-  assert.match(media, /wasPinching/);
-  assert.match(organizer, /AI 梳理/);
-  assert.match(organizer, /采用整理稿/);
-  assert.match(aiFunction, /DEEPSEEK_API_KEY/);
-  assert.match(aiFunction, /SUPABASE_SERVICE_ROLE_KEY/);
-  assert.match(aiFunction, /rateLimit/);
-  assert.doesNotMatch(aiFunction, /sb_secret_|sk-[A-Za-z0-9]/);
-  assert.match(dataLayer, /getBoardAttachmentUrl/);
-  assert.match(dataLayer, /reorderBoardAttachments/);
-  assert.match(dataLayer, /validateBoardAttachment/);
-  assert.match(dataLayer, /select\("\*, attachments\(\*\)"\)/);
-  assert.match(dataLayer, /\.select\("\*"\)\.single\(\)/);
-  assert.match(board, /commitCard\(applyCardPatch\(before, effectivePatch\), false\)/);
-  assert.match(board, /nextStageSortOrder\(cardsRef\.current, stage\)/);
-  assert.match(board, /if \(canSyncInBackground\) onClose\(\)/);
-  assert.match(board, /保存超时，内容已保留在本机草稿中/);
-  const mutationBody = board.slice(board.indexOf("const mutate ="), board.indexOf("const uploadFiles ="));
-  assert.doesNotMatch(mutationBody, /await load\(/, "single-card saves must not reload the entire board");
-  assert.match(schema, /enable row level security/);
-  assert.match(schema, /storage\.buckets/);
-  assert.match(migration, /completed_at/);
-  assert.match(migration, /previous_stage/);
-  assert.match(migration, /sort_order/);
-  assert.match(aiMigration, /original_text/);
-  assert.match(aiMigration, /ai_analysis/);
-  await access(new URL("dist/index.html", root));
+async function startStaticEntrypoint() {
+  const server = createServer(async (request, response) => {
+    if (request.url !== "/" && request.url !== "/index.html") {
+      response.writeHead(404).end();
+      return;
+    }
+
+    try {
+      const indexHtml = await readFile(new URL("index.html", dist));
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(indexHtml);
+    } catch {
+      response.writeHead(500).end();
+    }
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return server;
+}
+
+test("ships a runnable static entrypoint with the configured public Supabase URL", async () => {
+  const publicSupabaseUrl = process.env.VITE_SUPABASE_URL;
+  const publicBuildSha = process.env.VITE_BUILD_SHA;
+  assert.ok(publicSupabaseUrl, "artifact test requires VITE_SUPABASE_URL from the release build");
+  assert.ok(publicBuildSha, "artifact test requires VITE_BUILD_SHA from the release build");
+
+  const indexHtml = await readFile(new URL("dist/index.html", root), "utf8");
+  const modulePath = indexHtml.match(/<script\b(?=[^>]*\btype="module")[^>]*\bsrc="([^"]+)"[^>]*><\/script>/)?.[1];
+
+  assert.match(indexHtml, new RegExp(`<meta\\s+name="build-sha"\\s+content="${publicBuildSha}"\\s*/?>`));
+  assert.ok(modulePath?.startsWith("/assets/"), "built entrypoint must reference an emitted module");
+  const moduleSource = await readFile(new URL(`../dist${modulePath}`, import.meta.url), "utf8");
+  assert.ok(moduleSource.includes(publicSupabaseUrl), "built module must contain the configured Supabase URL");
+
+  const server = await startStaticEntrypoint();
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/`);
+    assert.equal(response.status, 200);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
 });
