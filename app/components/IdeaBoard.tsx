@@ -35,6 +35,7 @@ import { IdeaOrganizer } from "@/app/components/IdeaOrganizer";
 import type { OrganizerAdoption } from "@/app/components/IdeaOrganizer";
 import { applyCardPatch, getDoneBoardSlice, groupArchiveCards, matchesCard, nextStageSortOrder, replaceBoardCard, restoreStage } from "@/lib/board-model";
 import {
+  AttachmentDeleteError,
   createBoardCard,
   deleteBoardAttachment,
   getBoardAttachmentUrl,
@@ -319,13 +320,26 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     try { if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再删除截图"); await deleteBoardAttachment(attachment); await load(); }
     catch (reason) {
       const message = reason instanceof Error ? reason.message : "截图删除失败";
+      if (reason instanceof AttachmentDeleteError && reason.projection === "hidden") {
+        const hide = (card: CardRecord): CardRecord => ({
+          ...card,
+          attachments: card.attachments.filter((item) => item.id !== attachment.id),
+        });
+        commitCards(cardsRef.current.map(hide));
+        setSelected((current) => current && current !== "new" ? hide(current) : current);
+        setViewer((current) => {
+          if (!current?.attachments.some((item) => item.id === attachment.id)) return current;
+          const attachments = current.attachments.filter((item) => item.id !== attachment.id);
+          return attachments.length ? { attachments, index: Math.min(current.index, attachments.length - 1) } : null;
+        });
+      }
       if (navigator.onLine) await load();
       // load() clears its own notice on success, so restore the mutation error last.
       setError(message);
       setSyncState(navigator.onLine ? "error" : "offline");
     }
     finally { setSaving(false); }
-  }, [load]);
+  }, [commitCards, load]);
 
   const reorderAttachments = useCallback(async (cardId: number, ids: string[]) => {
     setSaving(true);

@@ -24,6 +24,16 @@ type ServiceError = {
   error?: string;
 };
 
+export type AttachmentDeleteProjection = "ready" | "hidden" | "unknown";
+
+/** Carries the safest UI projection independently from the primary delete error. */
+export class AttachmentDeleteError extends Error {
+  constructor(message: string, readonly projection: AttachmentDeleteProjection) {
+    super(message);
+    this.name = "AttachmentDeleteError";
+  }
+}
+
 type DbAttachment = {
   id: string;
   card_id: number;
@@ -89,16 +99,24 @@ function reportCompensationFailure(operation: string, error: ServiceError | null
   if (error) console.warn(`${operation}，后台恢复流程稍后会重试：${error.message}`);
 }
 
+function serviceError(reason: unknown, fallback: string): ServiceError {
+  return reason instanceof Error ? { message: reason.message } : { message: fallback };
+}
+
 type AttachmentSnapshot = Pick<DbAttachment, "id" | "user_id" | "object_key" | "state" | "updated_at">;
 
 async function readAttachment(id: string, userId: string): Promise<{ data: AttachmentSnapshot | null; error: ServiceError | null }> {
-  const { data, error } = await requireSupabase()
-    .from("attachments")
-    .select("id, user_id, object_key, state, updated_at")
-    .eq("id", id)
-    .eq("user_id", userId)
-    .maybeSingle();
-  return { data: data as AttachmentSnapshot | null, error };
+  try {
+    const { data, error } = await requireSupabase()
+      .from("attachments")
+      .select("id, user_id, object_key, state, updated_at")
+      .eq("id", id)
+      .eq("user_id", userId)
+      .maybeSingle();
+    return { data: data as AttachmentSnapshot | null, error };
+  } catch (reason) {
+    return { data: null, error: serviceError(reason, "截图状态读取失败") };
+  }
 }
 
 async function transitionAttachment(
@@ -115,7 +133,15 @@ async function transitionAttachment(
     .eq("user_id", userId)
     .eq("state", from);
   if (expectedUpdatedAt !== undefined) update = update.eq("updated_at", expectedUpdatedAt);
-  const { data, error } = await update.select("id, user_id, object_key, state, updated_at").maybeSingle();
+  let data: unknown = null;
+  let error: ServiceError | null = null;
+  try {
+    const result = await update.select("id, user_id, object_key, state, updated_at").maybeSingle();
+    data = result.data;
+    error = result.error;
+  } catch (reason) {
+    error = serviceError(reason, "截图状态更新失败");
+  }
   if (!error && data) return { data: data as AttachmentSnapshot, error: null, applied: true };
   const current = await readAttachment(id, userId);
   return { data: current.data, error: current.error ?? error, applied: false };
@@ -126,14 +152,22 @@ async function deleteAttachmentMetadata(
   userId: string,
   state: AttachmentState,
 ): Promise<{ deleted: boolean; data: AttachmentSnapshot | null; error: ServiceError | null }> {
-  const { data, error } = await requireSupabase()
-    .from("attachments")
-    .delete()
-    .eq("id", id)
-    .eq("user_id", userId)
-    .eq("state", state)
-    .select("id")
-    .maybeSingle();
+  let data: unknown = null;
+  let error: ServiceError | null = null;
+  try {
+    const result = await requireSupabase()
+      .from("attachments")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId)
+      .eq("state", state)
+      .select("id")
+      .maybeSingle();
+    data = result.data;
+    error = result.error;
+  } catch (reason) {
+    error = serviceError(reason, "截图记录删除失败");
+  }
   if (error) {
     const current = await readAttachment(id, userId);
     if (!current.error && current.data === null) return { deleted: true, data: null, error: null };
@@ -161,6 +195,60 @@ async function probeStorageObject(
       error: reason instanceof Error ? { message: reason.message } : { message: "对象状态探测失败" },
     };
   }
+}
+
+async function removeStorageObject(
+  bucket: ReturnType<ReturnType<typeof requireSupabase>["storage"]["from"]>,
+  objectKey: string,
+  verifyMissing = false,
+): Promise<{ result: "missing" | "exists" | "unknown"; error: ServiceError | null }> {
+  let removeError: ServiceError | null = null;
+  try {
+    const removed = await bucket.remove([objectKey]);
+    removeError = removed.error;
+  } catch (reason) {
+    removeError = serviceError(reason, "对象清理失败");
+  }
+  if (!removeError || isStorageNotFound(removeError)) {
+    if (!verifyMissing) return { result: "missing", error: null };
+    return probeStorageObject(bucket, objectKey);
+  }
+  const probe = await probeStorageObject(bucket, objectKey);
+  // The probe is compensation evidence; it must not replace the primary remove failure.
+  return { result: probe.result, error: removeError };
+}
+
+async function insertRecoverableAttachment(
+  row: Record<string, unknown>,
+  id: string,
+  userId: string,
+): Promise<{ data: AttachmentSnapshot | null; error: ServiceError | null; definitelyMissing: boolean }> {
+  let insertError: ServiceError | null = null;
+  try {
+    const result = await requireSupabase().from("attachments").insert(row);
+    insertError = result.error;
+  } catch (reason) {
+    insertError = serviceError(reason, "待恢复截图记录重建失败");
+  }
+  const current = await readAttachment(id, userId);
+  return {
+    data: current.data,
+    error: current.error ?? insertError,
+    definitelyMissing: current.data === null && current.error === null,
+  };
+}
+
+function deleteProjection(data: AttachmentSnapshot | null, error: ServiceError | null): AttachmentDeleteProjection {
+  if (!data) return error ? "unknown" : "hidden";
+  return data.state === "ready" ? "ready" : "hidden";
+}
+
+function failDelete(
+  error: ServiceError | null,
+  fallback: string,
+  projection: AttachmentDeleteProjection,
+): never {
+  throw new AttachmentDeleteError(error?.message || fallback, projection);
 }
 
 function mapAttachment(row: DbAttachment): AttachmentRecord {
@@ -276,32 +364,48 @@ export async function createBoardCard(
     if (lastError) fail(lastError, "无法准备新记录");
     sortOrder = (last?.sort_order ?? 0) + 1;
   }
-  const { data, error } = await client.from("cards").insert({
-    client_request_id: clientRequestId,
-    title: cleanTitle,
-    stage,
-    criteria: details.criteria?.trim() ?? "",
-    result: details.result?.trim() ?? "",
-    original_text: details.originalText ?? "",
-    organized_text: details.organizedText ?? "",
-    ai_analysis: details.aiAnalysis ?? null,
-    ai_model: details.aiModel ?? null,
-    ai_prompt_version: details.aiPromptVersion ?? null,
-    ai_organized_at: details.aiOrganizedAt ?? null,
-    sort_order: sortOrder,
-  }).select("*").single();
-  if (!error && data) return mapCard(data as DbCard);
+  let inserted: DbCard | null = null;
+  let insertError: ServiceError | null = null;
+  try {
+    const result = await client.from("cards").insert({
+      client_request_id: clientRequestId,
+      title: cleanTitle,
+      stage,
+      criteria: details.criteria?.trim() ?? "",
+      result: details.result?.trim() ?? "",
+      original_text: details.originalText ?? "",
+      organized_text: details.organizedText ?? "",
+      ai_analysis: details.aiAnalysis ?? null,
+      ai_model: details.aiModel ?? null,
+      ai_prompt_version: details.aiPromptVersion ?? null,
+      ai_organized_at: details.aiOrganizedAt ?? null,
+      sort_order: sortOrder,
+    }).select("*").single();
+    inserted = result.data as DbCard | null;
+    insertError = result.error;
+  } catch (reason) {
+    insertError = serviceError(reason, "新构思创建失败");
+  }
+  if (!insertError && inserted) return mapCard(inserted);
 
   // Both a unique conflict and a lost insert response are resolved by the same
   // owner-scoped lookup. Never issue a second insert for this request ID.
-  const { data: existing, error: existingError } = await client
-    .from("cards")
-    .select("*")
-    .eq("user_id", userData.user.id)
-    .eq("client_request_id", clientRequestId)
-    .maybeSingle();
+  let existing: DbCard | null = null;
+  let existingError: ServiceError | null = null;
+  try {
+    const result = await client
+      .from("cards")
+      .select("*")
+      .eq("user_id", userData.user.id)
+      .eq("client_request_id", clientRequestId)
+      .maybeSingle();
+    existing = result.data as DbCard | null;
+    existingError = result.error;
+  } catch (reason) {
+    existingError = serviceError(reason, "新构思状态确认失败");
+  }
   if (existing) return mapCard(existing as DbCard);
-  if (error) fail(error, "新构思创建失败");
+  if (insertError) fail(insertError, "新构思创建失败");
   fail(existingError, "新构思创建失败");
 }
 
@@ -425,13 +529,27 @@ export async function uploadBoardAttachment(cardId: number, file: File): Promise
   const primaryError = ready.error ?? { message: "截图状态保存冲突，请稍后重试" };
   if (ready.data === null && ready.error === null) {
     // A stale reconciler may have removed the pending row while this upload was
-    // still in flight. Re-establish metadata before returning so the object can
-    // never become an unrecoverable orphan.
-    const { error: recoveryError } = await client.from("attachments").insert(pendingRow);
-    if (recoveryError) {
-      const final = await readAttachment(attachmentId, userData.user.id);
-      if (final.data?.state === "ready") return;
-      reportCompensationFailure("截图状态冲突后的待恢复元数据重建失败", recoveryError);
+    // still in flight. Prefer a recoverable row; if that is definitely rejected,
+    // converge the uploaded object to absence before returning the primary error.
+    const recovery = await insertRecoverableAttachment(pendingRow, attachmentId, userData.user.id);
+    if (recovery.data?.state === "ready") return;
+    if (recovery.definitelyMissing) {
+      const bucket = client.storage.from(SCREENSHOT_BUCKET);
+      const cleanup = await removeStorageObject(bucket, objectKey, true);
+      if (cleanup.result !== "missing") {
+        // A lost remove response cannot justify abandoning the object. A second
+        // insert handles the common single-fault case and leaves reconcile state.
+        const retry = await insertRecoverableAttachment(pendingRow, attachmentId, userData.user.id);
+        if (retry.data?.state === "ready") return;
+        if (retry.definitelyMissing) {
+          const finalCleanup = await removeStorageObject(bucket, objectKey, true);
+          reportCompensationFailure("截图对象最终清理仍未确认", finalCleanup.error);
+        } else {
+          reportCompensationFailure("截图对象清理不确定，已重建待恢复元数据", retry.error);
+        }
+      }
+    } else {
+      reportCompensationFailure("截图状态冲突后的待恢复元数据重建失败", recovery.error);
     }
   }
   fail(primaryError, "截图状态保存失败");
@@ -451,25 +569,27 @@ export async function deleteBoardAttachment(attachment: AttachmentRecord): Promi
   const { data: userData, error: userError } = await client.auth.getUser();
   if (userError || !userData.user) fail(userError, "登录状态已失效");
   const deleting = await transitionAttachment(attachment.id, userData.user.id, "ready", "deleting");
-  if (!deleting.data) return;
-  if (deleting.data.state !== "deleting") {
-    if (deleting.error) fail(deleting.error, "截图删除准备失败");
-    throw new Error("截图状态已变化，请刷新后重试");
+  if (!deleting.applied) {
+    if (deleting.data === null && deleting.error === null) return;
+    failDelete(
+      deleting.error,
+      deleting.data?.state === "deleting" ? "截图正在由另一项操作处理" : "截图状态已变化，请刷新后重试",
+      deleteProjection(deleting.data, deleting.error),
+    );
   }
 
-  const { error: storageError } = await client.storage.from(SCREENSHOT_BUCKET).remove([attachment.objectKey]);
-  if (storageError && !isStorageNotFound(storageError)) {
-    const probe = await probeStorageObject(client.storage.from(SCREENSHOT_BUCKET), attachment.objectKey);
-    if (probe.result === "exists") {
+  const removal = await removeStorageObject(client.storage.from(SCREENSHOT_BUCKET), attachment.objectKey);
+  if (removal.result !== "missing") {
+    if (removal.result === "exists") {
       const rollback = await transitionAttachment(attachment.id, userData.user.id, "deleting", "ready");
       if (rollback.data?.state !== "ready") reportCompensationFailure("截图对象删除失败后的状态回滚也失败", rollback.error);
-      fail(storageError, "截图删除失败");
+      failDelete(removal.error, "截图删除失败", deleteProjection(rollback.data, rollback.error));
     }
-    if (probe.result === "unknown") fail(storageError, "截图删除结果暂时无法确认");
+    failDelete(removal.error, "截图删除结果暂时无法确认", "hidden");
   }
   clearAttachmentUrlCache(attachment.objectKey);
   const metadata = await deleteAttachmentMetadata(attachment.id, userData.user.id, "deleting");
-  if (!metadata.deleted) fail(metadata.error, "截图记录删除失败");
+  if (!metadata.deleted) failDelete(metadata.error, "截图记录删除失败", deleteProjection(metadata.data, metadata.error));
 }
 
 /** Repair stale interrupted attachment operations without exposing partial rows. */
@@ -514,17 +634,17 @@ export async function reconcileBoardAttachments(): Promise<void> {
       continue;
     }
 
-    const { error: removeError } = await bucket.remove([row.object_key]);
-    if (removeError && !isStorageNotFound(removeError)) {
-      const probe = await probeStorageObject(bucket, row.object_key);
-      if (probe.result === "exists") {
-        failures.push(removeError);
-        continue;
-      }
-      if (probe.result === "unknown") {
-        failures.push(probe.error ?? removeError);
-        continue;
-      }
+    // Same-state CAS refreshes updated_at and proves this pass owns cleanup.
+    const claim = await transitionAttachment(row.id, userData.user.id, "deleting", "deleting", row.updated_at);
+    if (!claim.applied || claim.data?.state !== "deleting") {
+      if (claim.error) failures.push(claim.error);
+      continue;
+    }
+
+    const removal = await removeStorageObject(bucket, row.object_key);
+    if (removal.result !== "missing") {
+      failures.push(removal.error ?? { message: "截图对象删除结果无法确认" });
+      continue;
     }
     const cleanup = await deleteAttachmentMetadata(row.id, userData.user.id, "deleting");
     if (!cleanup.deleted) failures.push(cleanup.error ?? { message: "截图删除恢复冲突" });

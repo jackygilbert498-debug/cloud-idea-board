@@ -47,6 +47,7 @@ type FakeCard = {
 type FakeRow = FakeAttachment | FakeCard;
 type QueryResult = { data: unknown; error: FakeError | null; count?: number | null };
 type Filter = { column: string; operation: "eq" | "in" | "lt"; value: unknown };
+type InsertFault = { phase: "before" | "after"; delivery: "error" | "throw"; error: FakeError };
 
 const clientHolder = vi.hoisted(() => ({ current: null as unknown }));
 
@@ -250,11 +251,27 @@ class FakeQuery implements PromiseLike<QueryResult> {
   }
 
   private async execute(): Promise<QueryResult> {
-    if (this.operation === "select") return this.shape(this.visibleRows());
+    if (this.operation === "select") {
+      if (this.table === "cards" && this.client.cardSelectError) {
+        return { data: null, error: this.client.cardSelectError };
+      }
+      const isAttachmentReread = this.table === "attachments"
+        && this.filters.some((item) => item.column === "id" && item.operation === "eq");
+      if (isAttachmentReread && this.client.attachmentReadErrorOnce) {
+        const readError = this.client.attachmentReadErrorOnce;
+        this.client.attachmentReadErrorOnce = null;
+        return { data: null, error: readError };
+      }
+      return this.shape(this.visibleRows());
+    }
 
     if (this.operation === "insert" && this.table === "cards") {
       const requestId = String(this.values.client_request_id);
       this.client.cardInsertAttempts.push(requestId);
+      if (this.client.cardInsertThrowOnce === "before") {
+        this.client.cardInsertThrowOnce = null;
+        throw new Error("card insert threw before commit");
+      }
       if (this.client.cardInsertErrorOnce) {
         const insertError = this.client.cardInsertErrorOnce;
         this.client.cardInsertErrorOnce = null;
@@ -272,6 +289,10 @@ class FakeQuery implements PromiseLike<QueryResult> {
       });
       this.client.cards.push(inserted);
       this.client.trace.push(`db:cards:insert:${requestId}`);
+      if (this.client.cardInsertThrowOnce === "after") {
+        this.client.cardInsertThrowOnce = null;
+        throw new Error("card insert threw after commit");
+      }
       if (this.client.ambiguousCardInsertOnce) {
         this.client.ambiguousCardInsertOnce = false;
         return { data: null, error: error("connection closed before response") };
@@ -280,6 +301,13 @@ class FakeQuery implements PromiseLike<QueryResult> {
     }
 
     if (this.operation === "insert" && this.table === "attachments") {
+      const attempt = ++this.client.attachmentInsertAttempts;
+      const fault = this.client.attachmentInsertFaults.get(attempt);
+      if (fault?.phase === "before") {
+        this.client.attachmentInsertFaults.delete(attempt);
+        if (fault.delivery === "throw") throw new Error(fault.error.message);
+        return { data: null, error: fault.error };
+      }
       const inserted = attachment(String(this.values.id), this.values.state as AttachmentState, {
         ...(this.values as Partial<FakeAttachment>),
         user_id: this.client.userId,
@@ -288,6 +316,11 @@ class FakeQuery implements PromiseLike<QueryResult> {
       });
       this.client.attachments.push(inserted);
       this.client.trace.push(`db:attachments:insert:${inserted.state}`);
+      if (fault?.phase === "after") {
+        this.client.attachmentInsertFaults.delete(attempt);
+        if (fault.delivery === "throw") throw new Error(fault.error.message);
+        return { data: null, error: fault.error };
+      }
       return this.shape([inserted]);
     }
 
@@ -313,6 +346,10 @@ class FakeQuery implements PromiseLike<QueryResult> {
         Object.assign(row, this.values, { updated_at: NOW.toISOString() });
       }
       if (this.table === "attachments" && state) this.client.trace.push(`db:attachments:update:${state}`);
+      if (this.table === "attachments" && state && this.client.afterCommitAttachmentStateThrowOnce === state) {
+        this.client.afterCommitAttachmentStateThrowOnce = null;
+        throw new Error(`threw after marking ${state}`);
+      }
       if (this.table === "attachments" && state && this.client.afterCommitAttachmentStateErrorOnce === state) {
         this.client.afterCommitAttachmentStateErrorOnce = null;
         return { data: null, error: error(`lost ${state} response`) };
@@ -327,6 +364,10 @@ class FakeQuery implements PromiseLike<QueryResult> {
     if (this.table === "attachments" && this.client.failAttachmentDeleteOnce) {
       this.client.failAttachmentDeleteOnce = false;
       return { data: null, error: error("metadata delete failed") };
+    }
+    if (this.table === "attachments" && this.client.throwAttachmentDeleteOnce) {
+      this.client.throwAttachmentDeleteOnce = false;
+      throw new Error("metadata delete threw");
     }
     const source = this.table === "cards" ? this.client.cards : this.client.attachments;
     for (const row of rows) {
@@ -352,22 +393,31 @@ class FakeSupabase {
   nextCardId = 1;
   ambiguousCardInsertOnce = false;
   cardInsertErrorOnce: FakeError | null = null;
+  cardInsertThrowOnce: "before" | "after" | null = null;
+  cardSelectError: FakeError | null = null;
   readonly cardInsertAttempts: string[] = [];
   uploadError: FakeError | null = null;
   uploadAfterCommitError: FakeError | null = null;
+  attachmentInsertAttempts = 0;
+  attachmentInsertFaults = new Map<number, InsertFault>();
   removeErrors = new Map<string, FakeError>();
+  removeThrows = new Map<string, Error>();
   removeAfterCommitErrors = new Map<string, FakeError>();
   existsErrors = new Map<string, FakeError>();
   downloadErrors = new Map<string, FakeError>();
   failAttachmentStateOnce: AttachmentState | null = null;
   afterCommitAttachmentStateErrorOnce: AttachmentState | null = null;
+  afterCommitAttachmentStateThrowOnce: AttachmentState | null = null;
   zeroAttachmentStateOnce: AttachmentState | null = null;
   onZeroAttachmentState: ((state: AttachmentState) => void) | null = null;
   beforeAttachmentStateUpdateOnce: (() => void) | null = null;
+  attachmentReadErrorOnce: FakeError | null = null;
   failAttachmentDeleteOnce = false;
+  throwAttachmentDeleteOnce = false;
   afterCommitAttachmentDeleteErrorOnce = false;
   zeroAttachmentDeleteOnce = false;
   rpcError: FakeError | null = null;
+  beforeStorageRemoveOnce: (() => Promise<void>) | null = null;
 
   readonly auth = {
     getUser: async () => ({ data: { user: { id: this.userId } }, error: null }),
@@ -387,6 +437,11 @@ class FakeSupabase {
         remove: async (objectKeys: string[]) => {
           const objectKey = objectKeys[0];
           this.trace.push(`storage:remove:${objectKey}`);
+          const beforeRemove = this.beforeStorageRemoveOnce;
+          this.beforeStorageRemoveOnce = null;
+          if (beforeRemove) await beforeRemove();
+          const thrown = this.removeThrows.get(objectKey);
+          if (thrown) throw thrown;
           const configured = this.removeErrors.get(objectKey);
           if (configured) return { data: null, error: configured };
           if (!this.objects.has(objectKey)) {
@@ -400,7 +455,7 @@ class FakeSupabase {
         exists: async (objectKey: string) => {
           this.trace.push(`storage:exists:${objectKey}`);
           const configured = this.existsErrors.get(objectKey);
-          if (configured) return { data: false, error: configured };
+          if (configured) throw new Error(configured.message);
           if (this.objects.has(objectKey)) return { data: true, error: null };
           return { data: false, error: error("Object not found", { statusCode: "404" }) };
         },
@@ -514,6 +569,61 @@ describe("attachment state machine", () => {
     expect(fakeClient.attachments).toEqual([expect.objectContaining({ id: A_ID, state: "pending" })]);
   });
 
+  test("a recovery insert rejected before commit removes the uploaded object", async () => {
+    fakeClient.zeroAttachmentStateOnce = "ready";
+    fakeClient.onZeroAttachmentState = () => { fakeClient.attachments.splice(0); };
+    fakeClient.attachmentInsertFaults.set(2, {
+      phase: "before",
+      delivery: "error",
+      error: error("recovery insert rejected"),
+    });
+    const image = new File(["test"], "image.png", { type: "image/png" });
+
+    await expect(uploadBoardAttachment(7, image)).rejects.toThrow(/截图状态/);
+
+    expect(fakeClient.attachments).toHaveLength(0);
+    expect(fakeClient.objects).toHaveLength(0);
+    expect(fakeClient.trace).toContain(`storage:remove:${USER_ID}/7/${A_ID}/image.png`);
+    expect(fakeClient.trace).toContain(`storage:exists:${USER_ID}/7/${A_ID}/image.png`);
+  });
+
+  test("a recovery insert response lost after commit leaves pending metadata for reconcile", async () => {
+    fakeClient.zeroAttachmentStateOnce = "ready";
+    fakeClient.onZeroAttachmentState = () => { fakeClient.attachments.splice(0); };
+    fakeClient.attachmentInsertFaults.set(2, {
+      phase: "after",
+      delivery: "error",
+      error: error("lost recovery insert response"),
+    });
+    const image = new File(["test"], "image.png", { type: "image/png" });
+
+    await expect(uploadBoardAttachment(7, image)).rejects.toThrow(/截图状态/);
+
+    expect(fakeClient.objects).toHaveLength(1);
+    expect(fakeClient.attachments).toEqual([expect.objectContaining({ id: A_ID, state: "pending" })]);
+    expect(fakeClient.trace.some((item) => item.startsWith("storage:remove:"))).toBe(false);
+  });
+
+  test("an uncertain recovery cleanup recreates pending metadata instead of orphaning the object", async () => {
+    const objectKey = `${USER_ID}/7/${A_ID}/image.png`;
+    fakeClient.zeroAttachmentStateOnce = "ready";
+    fakeClient.onZeroAttachmentState = () => { fakeClient.attachments.splice(0); };
+    fakeClient.attachmentInsertFaults.set(2, {
+      phase: "before",
+      delivery: "error",
+      error: error("recovery insert rejected"),
+    });
+    fakeClient.removeErrors.set(objectKey, error("remove response unknown"));
+    fakeClient.existsErrors.set(objectKey, error("exists request timed out", { statusCode: "503" }));
+    const image = new File(["test"], "image.png", { type: "image/png" });
+
+    await expect(uploadBoardAttachment(7, image)).rejects.toThrow(/截图状态/);
+
+    expect(fakeClient.objects.has(objectKey)).toBe(true);
+    expect(fakeClient.attachments).toEqual([expect.objectContaining({ id: A_ID, state: "pending" })]);
+    expect(fakeClient.trace).toContain(`storage:exists:${objectKey}`);
+  });
+
   test("ready transition failure keeps the uploaded object with pending metadata", async () => {
     fakeClient.failAttachmentStateOnce = "ready";
     const image = new File(["test"], "image.png", { type: "image/png" });
@@ -542,6 +652,69 @@ describe("attachment state machine", () => {
       `storage:exists:${row.object_key}`,
       "db:attachments:update:ready",
     ]);
+  });
+
+  test("a thrown object removal is probed and reports the confirmed ready projection", async () => {
+    const row = attachment(A_ID, "ready");
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.removeThrows.set(row.object_key, new Error("remove fetch threw"));
+
+    let failure: unknown;
+    try { await deleteBoardAttachment(asRecord(row)); }
+    catch (reason) { failure = reason; }
+
+    expect(failure).toMatchObject({ message: "remove fetch threw", projection: "ready" });
+    expect(row.state).toBe("ready");
+    expect(fakeClient.objects.has(row.object_key)).toBe(true);
+  });
+
+  test("a second deleter cannot touch storage owned by the first claim", async () => {
+    const row = attachment(A_ID, "ready");
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.removeErrors.set(row.object_key, error("storage unavailable", { statusCode: "503" }));
+    let secondError: unknown;
+    fakeClient.beforeStorageRemoveOnce = async () => {
+      try { await deleteBoardAttachment(asRecord(row)); }
+      catch (reason) { secondError = reason; }
+    };
+
+    await expect(deleteBoardAttachment(asRecord(row))).rejects.toThrow("storage unavailable");
+
+    expect(secondError).toBeInstanceOf(Error);
+    expect(fakeClient.trace.filter((item) => item === `storage:remove:${row.object_key}`)).toHaveLength(1);
+    expect(row.state).toBe("ready");
+    expect(fakeClient.objects.has(row.object_key)).toBe(true);
+  });
+
+  test("delete does not report success when both its CAS and final-state reread fail", async () => {
+    const row = attachment(A_ID, "ready");
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.failAttachmentStateOnce = "deleting";
+    fakeClient.attachmentReadErrorOnce = error("attachment reread unavailable");
+
+    await expect(deleteBoardAttachment(asRecord(row))).rejects.toThrow("attachment reread unavailable");
+
+    expect(fakeClient.objects.has(row.object_key)).toBe(true);
+    expect(fakeClient.trace.some((item) => item.startsWith("storage:remove:"))).toBe(false);
+  });
+
+  test("a deleting CAS throw after commit is reread as hidden without touching storage", async () => {
+    const row = attachment(A_ID, "ready");
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.afterCommitAttachmentStateThrowOnce = "deleting";
+
+    let failure: unknown;
+    try { await deleteBoardAttachment(asRecord(row)); }
+    catch (reason) { failure = reason; }
+
+    expect(failure).toMatchObject({ message: "threw after marking deleting", projection: "hidden" });
+    expect(row.state).toBe("deleting");
+    expect(fakeClient.objects.has(row.object_key)).toBe(true);
+    expect(fakeClient.trace.some((item) => item.startsWith("storage:remove:"))).toBe(false);
   });
 
   test("delete leaves deleting metadata when metadata removal fails", async () => {
@@ -652,6 +825,19 @@ describe("attachment state machine", () => {
     expect(fakeClient.objects.has(activeDelete.object_key)).toBe(true);
     expect(fakeClient.trace.some((item) => item.startsWith("storage:"))).toBe(false);
   });
+
+  test("reconcile cannot remove an object from a stale deleting row reclaimed by an active delete", async () => {
+    const activeDelete = attachment(A_ID, "deleting");
+    fakeClient.attachments.push(activeDelete);
+    fakeClient.objects.add(activeDelete.object_key);
+    fakeClient.beforeAttachmentStateUpdateOnce = () => { activeDelete.updated_at = FRESH; };
+
+    await reconcileBoardAttachments();
+
+    expect(activeDelete).toEqual(expect.objectContaining({ state: "deleting", updated_at: FRESH }));
+    expect(fakeClient.objects.has(activeDelete.object_key)).toBe(true);
+    expect(fakeClient.trace.some((item) => item.startsWith("storage:remove:"))).toBe(false);
+  });
 });
 
 describe("local attachment cache boundary", () => {
@@ -696,6 +882,28 @@ describe("card creation and attachment ordering", () => {
     expect(first.id).toBe(retry.id);
     expect(fakeClient.cards).toHaveLength(1);
     expect(fakeClient.cards[0]).toMatchObject({ client_request_id: REQUEST_ID, sort_order: 3 });
+  });
+
+  test("a card insert throw after commit resolves through the owner-scoped request lookup", async () => {
+    fakeClient.cardInsertThrowOnce = "after";
+
+    const created = await createBoardCard("异常后回查", "idea", {}, REQUEST_ID, 3);
+
+    expect(created.id).toBe(1);
+    expect(fakeClient.cards).toHaveLength(1);
+    expect(fakeClient.cards[0]).toMatchObject({ user_id: USER_ID, client_request_id: REQUEST_ID });
+  });
+
+  test("a card insert throw before commit fails safely and the same UUID can be retried", async () => {
+    fakeClient.cardInsertThrowOnce = "before";
+
+    await expect(createBoardCard("未提交", "idea", {}, REQUEST_ID, 3)).rejects.toThrow("card insert threw before commit");
+    expect(fakeClient.cards).toHaveLength(0);
+
+    const retried = await createBoardCard("未提交", "idea", {}, REQUEST_ID, 3);
+    expect(retried.id).toBe(1);
+    expect(fakeClient.cards).toHaveLength(1);
+    expect(fakeClient.cardInsertAttempts).toEqual([REQUEST_ID, REQUEST_ID]);
   });
 
   test("reorder is one atomic RPC and preserves input order", async () => {
@@ -804,6 +1012,30 @@ describe("card creation and attachment ordering", () => {
 
     expect(container.querySelector(".attachment-grid")).toBeNull();
     expect(container.querySelector(".notice")?.textContent).toContain("metadata delete failed");
+    expect(readBoardCache(USER_ID)[0].attachments).toHaveLength(0);
+    await act(async () => root.unmount());
+  });
+
+  test("confirmed deleting projection stays hidden when metadata delete and list both fail", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const row = attachment(A_ID, "ready");
+    fakeClient.cards.push(card(7));
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await renderBoard(root);
+    fakeClient.throwAttachmentDeleteOnce = true;
+    fakeClient.cardSelectError = error("list unavailable");
+    await click(container.querySelector<HTMLButtonElement>(".task-card-main")!);
+    await click(container.querySelector<HTMLButtonElement>('button[aria-label="删除截图"]')!);
+
+    expect(container.querySelector(".attachment-grid")).toBeNull();
+    expect(container.querySelector(".notice")?.textContent).toContain("metadata delete threw");
     expect(readBoardCache(USER_ID)[0].attachments).toHaveLength(0);
     await act(async () => root.unmount());
   });
