@@ -123,6 +123,7 @@ afterEach(async () => {
   appAuth.configuration = null;
   appAuth.activeClient = appAuth.initial.client;
   appAuth.mode = "persistent";
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -200,6 +201,21 @@ test("account panel shows the personal session and validates a browser-managed p
   });
   expect(passwords).toEqual(["new-password"]);
   expect(container.querySelector('[role="status"]')?.textContent).toContain("密码已更新");
+});
+
+test("account panel shows a short verified build SHA", async () => {
+  vi.stubEnv("VITE_BUILD_SHA", "abcdef0123456789");
+  await renderPanel();
+
+  expect(container.textContent).toContain("版本 abcdef0");
+  expect(container.textContent).not.toContain("abcdef0123456789");
+});
+
+test("account panel labels a missing build SHA as a development build", async () => {
+  vi.stubEnv("VITE_BUILD_SHA", "");
+  await renderPanel();
+
+  expect(container.textContent).toContain("开发版");
 });
 
 test("the three logout entries send explicit scope and local cleanup requests", async () => {

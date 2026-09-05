@@ -19,7 +19,8 @@
     "test:artifact": "node --test tests/netlify-build.test.mjs",
     "verify": "npm run lint && npm run typecheck && npm run test:unit && npm run test:regression && npm run test:contracts",
     "build:release": "node scripts/validate-release-env.mjs && vite build",
-    "verify:release": "npm run verify && npm run build:release && npm run test:artifact"
+    "verify:release": "npm run verify && npm run build:release && npm run test:artifact",
+    "verify:netlify": "node scripts/run-release-verification.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

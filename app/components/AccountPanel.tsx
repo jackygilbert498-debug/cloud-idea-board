@@ -68,10 +68,12 @@ export function AccountPanel({ email, authMode, onUpdatePassword, onSignOut }: A
   };
 
   const busy = Boolean(pendingAction);
+  const rawBuildSha = import.meta.env.VITE_BUILD_SHA?.trim() ?? "";
+  const buildLabel = /^[0-9a-f]{7,64}$/i.test(rawBuildSha) ? `版本 ${rawBuildSha.slice(0, 7)}` : "开发版";
   return <div className="account-panel">
     <section className="account-summary">
       <span className="account-panel-icon"><Laptop size={19} /></span>
-      <div><p className="eyebrow">PERSONAL ACCOUNT</p><h1>个人账号</h1><p>{email}</p></div>
+      <div><p className="eyebrow">PERSONAL ACCOUNT</p><h1>个人账号</h1><p>{email}</p><p>{buildLabel}</p></div>
       <span className="session-mode"><ShieldCheck size={14} />{authMode === "persistent" ? "此设备保持登录" : "仅当前浏览器会话"}</span>
     </section>
 
