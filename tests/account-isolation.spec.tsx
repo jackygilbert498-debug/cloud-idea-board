@@ -5,7 +5,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 import App from "@/src/App";
 import { boardCacheKey, draftKey } from "@/lib/local-state";
-import type { CardPatch, CardRecord } from "@/lib/types";
+import type { AttachmentRecord, CardPatch, CardRecord } from "@/lib/types";
 
 const auth = vi.hoisted(() => ({
   listener: null as null | ((event: AuthChangeEvent, session: Session | null) => void),
@@ -96,6 +96,20 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function attachment(id: string, sortOrder: number): AttachmentRecord {
+  return {
+    id,
+    cardId: 1,
+    objectKey: `alice/1/${id}.png`,
+    filename: `${id}.png`,
+    contentType: "image/png",
+    size: 100,
+    sortOrder,
+    state: "ready",
+    createdAt: `2026-09-06T01:0${sortOrder}:00Z`,
+  };
 }
 
 async function renderOnlineBoard() {
@@ -211,6 +225,130 @@ test("rechecking a pending save only reloads and the original promise can still 
   expect(board.updateCalls).toBe(1);
 });
 
+test("late success from an unmounted Alice board cannot clear Alice's newer draft or rewrite caches", async () => {
+  board.cards = [card()];
+  const completion = deferred<CardRecord>();
+  board.update = () => completion.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  await act(async () => changeTextarea(container.querySelector<HTMLTextAreaElement>(".title-field textarea")!, "Alice 旧保存"));
+  vi.useFakeTimers();
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(12_001); });
+  const aliceCache = localStorage.getItem(boardCacheKey("alice"));
+
+  board.cards = [card({ title: "Bob 卡片" })];
+  await act(async () => auth.listener!("SIGNED_IN", session("bob")));
+  localStorage.setItem(draftKey("alice", 1), JSON.stringify({ title: "Alice 切换后新草稿" }));
+  await act(async () => {
+    completion.resolve(card({ title: "Alice 旧保存" }));
+    await Promise.resolve();
+  });
+
+  expect(JSON.parse(localStorage.getItem(draftKey("alice", 1))!).title).toBe("Alice 切换后新草稿");
+  expect(localStorage.getItem(boardCacheKey("alice"))).toBe(aliceCache);
+  expect((JSON.parse(localStorage.getItem(boardCacheKey("bob"))!) as CardRecord[])[0].title).toBe("Bob 卡片");
+});
+
+test("confirmation before the timeout still cannot resume an unmounted editor and clear its user's new draft", async () => {
+  board.cards = [card()];
+  const completion = deferred<CardRecord>();
+  board.update = () => completion.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  await act(async () => changeTextarea(container.querySelector<HTMLTextAreaElement>(".title-field textarea")!, "Alice 保存中"));
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+
+  board.cards = [card({ title: "Bob 卡片" })];
+  await act(async () => auth.listener!("SIGNED_IN", session("bob")));
+  localStorage.setItem(draftKey("alice", 1), JSON.stringify({ title: "Alice 切换后新草稿" }));
+  await act(async () => {
+    completion.resolve(card({ title: "Alice 保存中" }));
+    await Promise.resolve();
+  });
+
+  expect(JSON.parse(localStorage.getItem(draftKey("alice", 1))!).title).toBe("Alice 切换后新草稿");
+});
+
+test("late failure from an unmounted Alice board cannot roll back Alice's cache", async () => {
+  board.cards = [card()];
+  const completion = deferred<CardRecord>();
+  board.update = () => completion.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  await act(async () => changeTextarea(container.querySelector<HTMLTextAreaElement>(".title-field textarea")!, "Alice 待核对"));
+  vi.useFakeTimers();
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(12_001); });
+  const aliceCache = localStorage.getItem(boardCacheKey("alice"));
+
+  board.cards = [card({ title: "Bob 卡片" })];
+  await act(async () => auth.listener!("SIGNED_IN", session("bob")));
+  await act(async () => {
+    completion.reject(new Error("Alice 旧请求晚到失败"));
+    await Promise.resolve();
+  });
+
+  expect(localStorage.getItem(boardCacheKey("alice"))).toBe(aliceCache);
+  expect((JSON.parse(localStorage.getItem(boardCacheKey("bob"))!) as CardRecord[])[0].title).toBe("Bob 卡片");
+});
+
+test("two rejected mutations restore the last confirmed card instead of the first optimistic card", async () => {
+  board.cards = [card()];
+  const first = deferred<CardRecord>();
+  const second = deferred<CardRecord>();
+  const completions = [first, second];
+  board.update = () => completions.shift()!.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  const optionButtons = Array.from(container.querySelectorAll<HTMLButtonElement>(".editor-options button"));
+  await act(async () => optionButtons.find((button) => button.textContent?.includes("参考"))!.click());
+  await act(async () => optionButtons.find((button) => button.textContent?.includes("归档"))!.click());
+
+  await act(async () => {
+    second.reject(new Error("归档失败"));
+    await Promise.resolve();
+  });
+  await act(async () => {
+    first.reject(new Error("参考失败"));
+    await Promise.resolve();
+  });
+
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].reference).toBe(false);
+  expect(cached[0].archived).toBe(false);
+});
+
+test("pending reload merges only mutation fields and keeps the latest server attachment projection", async () => {
+  const originalAttachment = attachment("old", 1);
+  const newAttachment = attachment("new", 0);
+  board.cards = [card({ attachments: [originalAttachment] })];
+  const completion = deferred<CardRecord>();
+  board.update = () => completion.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  await act(async () => changeTextarea(container.querySelector<HTMLTextAreaElement>(".title-field textarea")!, "本地待核对标题"));
+  vi.useFakeTimers();
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(12_001); });
+
+  board.cards = [card({ reference: true, attachments: [newAttachment, originalAttachment] })];
+  await act(async () => container.querySelector<HTMLButtonElement>(".notice-retry")!.click());
+  let cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].title).toBe("本地待核对标题");
+  expect(cached[0].reference).toBe(true);
+  expect(cached[0].attachments.map((item) => item.id)).toEqual(["new", "old"]);
+  expect(container.querySelector(".attachments .section-title small")?.textContent).toBe("2 张");
+
+  await act(async () => {
+    completion.resolve(card({ title: "本地待核对标题", attachments: [originalAttachment] }));
+    await Promise.resolve();
+  });
+  cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].reference).toBe(true);
+  expect(cached[0].attachments.map((item) => item.id)).toEqual(["new", "old"]);
+});
+
 test("late stale results cannot overwrite a newer mutation and activity remains busy until both finish", async () => {
   board.cards = [card()];
   const first = deferred<CardRecord>();
@@ -226,13 +364,13 @@ test("late stale results cannot overwrite a newer mutation and activity remains 
   expect(save.disabled).toBe(true);
 
   await act(async () => {
-    first.resolve(card({ reference: true }));
+    second.resolve(card({ archived: true }));
     await Promise.resolve();
   });
   expect(save.disabled).toBe(true);
 
   await act(async () => {
-    second.resolve(card({ archived: true }));
+    first.resolve(card({ reference: true }));
     await Promise.resolve();
   });
   expect(save.disabled).toBe(false);

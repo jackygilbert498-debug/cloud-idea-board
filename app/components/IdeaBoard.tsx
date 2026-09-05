@@ -71,6 +71,8 @@ const UNDO_DURATION = 6_000;
 type View = "board" | "list" | "archive";
 type SelectedCard = CardRecord | "new" | null;
 type UndoAction = { cardId: number; title: string; stage: Exclude<Stage, "done"> };
+type CardMutation = { version: number; patch: CardPatch; pendingConfirmation: boolean };
+type CardMutationChain = { base: CardRecord; operations: Map<number, CardMutation> };
 
 function nextStage(stage: Stage): Stage | null {
   const index = STAGES.indexOf(stage);
@@ -109,6 +111,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const [mobileMenu, setMobileMenu] = useState(false);
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const cardsRef = useRef(cards);
+  const mutationChainsRef = useRef(new Map<number, CardMutationChain>());
   const saving = activeOperations > 0;
   const beginOperation = useCallback(() => operationCoordinator.beginOperation(), [operationCoordinator]);
 
@@ -124,6 +127,71 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       setSelected((current) => current && current !== "new" && current.id === card.id ? card : current);
     }
   }, [commitCards]);
+
+  const projectMutationChain = useCallback((chain: CardMutationChain): CardRecord => {
+    const operations = [...chain.operations.values()].sort((left, right) => left.version - right.version);
+    const projected = operations.reduce(
+      (current, operation) => applyCardPatch(current, operation.patch),
+      chain.base,
+    );
+    return {
+      ...projected,
+      mutationVersion: operations.at(-1)?.version,
+      pendingConfirmation: operations.some((operation) => operation.pendingConfirmation),
+    };
+  }, []);
+
+  const settleCardMutation = useCallback((
+    cardId: number,
+    version: number,
+    outcome: { state: "confirmed"; card: CardRecord } | { state: "failed" },
+  ): { card: CardRecord; remaining: CardMutation[] } | null => {
+    const chain = mutationChainsRef.current.get(cardId);
+    if (!chain?.operations.has(version)) return null;
+    if (outcome.state === "confirmed") {
+      const attachments = cardsRef.current.find((card) => card.id === cardId)?.attachments
+        ?? chain.base.attachments;
+      const confirmedOperations = [...chain.operations.values()]
+        .filter((operation) => operation.version <= version);
+      const confirmedFields: Partial<CardRecord> = {};
+      for (const operation of confirmedOperations) {
+        for (const field of Object.keys(operation.patch) as (keyof CardPatch)[]) {
+          Object.assign(confirmedFields, { [field]: outcome.card[field] });
+        }
+      }
+      const ownsStage = confirmedOperations.some((operation) => operation.patch.stage !== undefined);
+      const ownsOriginalText = confirmedOperations.some((operation) => operation.patch.originalText !== undefined);
+      const ownsArchive = confirmedOperations.some((operation) => operation.patch.archived !== undefined);
+      chain.base = {
+        ...chain.base,
+        ...confirmedFields,
+        attachments,
+        updatedAt: outcome.card.updatedAt,
+        completedAt: ownsStage ? outcome.card.completedAt : chain.base.completedAt,
+        previousStage: ownsStage ? outcome.card.previousStage : chain.base.previousStage,
+        originalTextUpdatedAt: ownsOriginalText
+          ? outcome.card.originalTextUpdatedAt
+          : chain.base.originalTextUpdatedAt,
+        focus: ownsStage || ownsArchive ? outcome.card.focus : (confirmedFields.focus ?? chain.base.focus),
+        mutationVersion: version,
+        pendingConfirmation: false,
+      };
+      for (const operationVersion of chain.operations.keys()) {
+        if (operationVersion <= version) chain.operations.delete(operationVersion);
+      }
+    } else {
+      chain.operations.delete(version);
+    }
+    const remaining = [...chain.operations.values()];
+    if (!remaining.length) {
+      mutationChainsRef.current.delete(cardId);
+      return {
+        card: { ...chain.base, mutationVersion: version, pendingConfirmation: false },
+        remaining,
+      };
+    }
+    return { card: projectMutationChain(chain), remaining };
+  }, [projectMutationChain]);
 
   const load = useCallback(async () => {
     if (!navigator.onLine) {
@@ -143,21 +211,34 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         console.warn("未完成的截图操作暂未恢复，将在下次同步重试。", reason);
       }
       const data = await withTimeout(listBoardCards(), LOAD_TIMEOUT, "同步超时，请检查网络后重试");
-      const ownedPending = new Map(cardsRef.current
-        .filter((card) => card.pendingConfirmation && card.mutationVersion !== undefined
-          && operationCoordinator.isCurrentMutation(card.id, card.mutationVersion))
-        .map((card) => [card.id, card]));
-      const next = data.map((card) => ownedPending.get(card.id) ?? card);
-      for (const card of ownedPending.values()) {
-        if (!next.some((item) => item.id === card.id)) next.push(card);
+      const serverIds = new Set(data.map((card) => card.id));
+      const next = data.map((card) => {
+        const chain = mutationChainsRef.current.get(card.id);
+        if (!chain?.operations.size) return card;
+        // A pending card mutation owns only its patch fields. Attachments and
+        // unrelated fields continue to come from the latest server projection.
+        chain.base = { ...card, mutationVersion: undefined, pendingConfirmation: false };
+        return projectMutationChain(chain);
+      });
+      for (const [cardId, chain] of mutationChainsRef.current) {
+        if (!serverIds.has(cardId) && chain.operations.size) next.push(projectMutationChain(chain));
       }
       commitCards(next);
       setSelected((current) => {
         if (!current || current === "new") return current;
-        return next.find((card) => card.id === current.id) ?? null;
+        const nextCard = next.find((card) => card.id === current.id);
+        if (!nextCard) return null;
+        if (!mutationChainsRef.current.has(current.id)) return nextCard;
+        // Preserve editor draft dirtiness while still accepting server-owned attachments.
+        return {
+          ...current,
+          attachments: nextCard.attachments,
+          mutationVersion: nextCard.mutationVersion,
+          pendingConfirmation: nextCard.pendingConfirmation,
+        };
       });
       setError("");
-      setSyncState(ownedPending.size ? "checking" : "synced");
+      setSyncState(next.some((card) => card.pendingConfirmation) ? "checking" : "synced");
       return next;
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "加载失败";
@@ -169,8 +250,16 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     } finally {
       setLoading(false);
     }
-  }, [commitCards, operationCoordinator, userId]);
+  }, [commitCards, projectMutationChain, userId]);
 
+  useEffect(() => {
+    const lifecycle = operationCoordinator.activate();
+    const mutationChains = mutationChainsRef.current;
+    return () => {
+      operationCoordinator.dispose(lifecycle);
+      mutationChains.clear();
+    };
+  }, [operationCoordinator]);
   useEffect(() => {
     // Initial cloud synchronization is intentionally owned by the board shell.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -221,16 +310,22 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     const effectivePatch = patch.stage !== undefined && patch.stage !== before.stage && patch.sortOrder === undefined
       ? { ...patch, sortOrder: nextStageSortOrder(cardsRef.current, patch.stage) }
       : patch;
+    const lifecycle = operationCoordinator.lifecycleId;
     const mutationVersion = operationCoordinator.nextMutationVersion(id);
-    const optimistic = {
-      ...applyCardPatch(before, effectivePatch),
-      mutationVersion,
+    let chain = mutationChainsRef.current.get(id);
+    if (!chain) {
+      chain = {
+        base: { ...before, mutationVersion: undefined, pendingConfirmation: false },
+        operations: new Map(),
+      };
+      mutationChainsRef.current.set(id, chain);
+    }
+    chain.operations.set(mutationVersion, {
+      version: mutationVersion,
+      patch: effectivePatch,
       pendingConfirmation: false,
-    };
-    const preserveCurrentAttachments = (card: CardRecord): CardRecord => ({
-      ...card,
-      attachments: cardsRef.current.find((current) => current.id === id)?.attachments ?? card.attachments,
     });
+    const optimistic = projectMutationChain(chain);
     // Keep the editor's original card prop until the server confirms the write.
     // This prevents its local draft from being cleared during an in-flight save.
     commitCard(optimistic, false);
@@ -242,53 +337,76 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       const completion = updateBoardCard(id, effectivePatch, before);
       const initial = await waitForInitialOutcome(completion, SAVE_TIMEOUT);
       if (initial.state === "pending") {
-        const pendingCard = { ...optimistic, pendingConfirmation: true };
-        if (operationCoordinator.isCurrentMutation(id, mutationVersion)) {
+        const pendingOperation = mutationChainsRef.current.get(id)?.operations.get(mutationVersion);
+        if (pendingOperation) pendingOperation.pendingConfirmation = true;
+        const pendingChain = mutationChainsRef.current.get(id);
+        const pendingCard = pendingChain ? projectMutationChain(pendingChain) : optimistic;
+        if (operationCoordinator.isActiveLifecycle(lifecycle) && pendingOperation) {
           commitCard(pendingCard, false);
           setError("保存结果待核对，内容和本机草稿已保留；不会自动重复提交。");
           setSyncState("checking");
         }
         finishesInBackground = true;
         void completion.then((card) => {
-          if (!operationCoordinator.isCurrentMutation(id, mutationVersion)) return;
-          const confirmed = preserveCurrentAttachments({ ...card, mutationVersion, pendingConfirmation: false });
-          commitCard(confirmed);
+          if (!operationCoordinator.isActiveLifecycle(lifecycle)) return;
+          const settled = settleCardMutation(id, mutationVersion, { state: "confirmed", card });
+          if (!settled) return;
+          commitCard(settled.card, settled.remaining.length === 0);
           if (clearDraftOnConfirm) clearCardDraft(userId, id);
-          setError("");
-          setSyncState("synced");
+          if (!settled.remaining.length) setError("");
+          setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
+            ? "checking"
+            : settled.remaining.length ? "syncing" : "synced");
           if (before.stage !== "done" && patch.stage === "done") {
             setUndoAction({ cardId: id, title: before.title, stage: before.stage });
           }
         }, (reason: unknown) => {
-          if (!operationCoordinator.isCurrentMutation(id, mutationVersion)) return;
-          commitCard(preserveCurrentAttachments({ ...before, mutationVersion, pendingConfirmation: false }));
+          if (!operationCoordinator.isActiveLifecycle(lifecycle)) return;
+          const settled = settleCardMutation(id, mutationVersion, { state: "failed" });
+          if (!settled) return;
+          commitCard(settled.card, settled.remaining.length === 0);
           setError(reason instanceof Error ? reason.message : "保存失败");
-          setSyncState(navigator.onLine ? "error" : "offline");
+          setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
+            ? "checking"
+            : settled.remaining.length ? "syncing" : navigator.onLine ? "error" : "offline");
         }).finally(finishOperation);
         return { card: pendingCard, state: "pending" };
       }
-      const card = preserveCurrentAttachments({ ...initial.value, mutationVersion, pendingConfirmation: false });
-      if (operationCoordinator.isCurrentMutation(id, mutationVersion)) {
-        commitCard(card);
+      const lifecycleActive = operationCoordinator.isActiveLifecycle(lifecycle);
+      const settled = lifecycleActive
+        ? settleCardMutation(id, mutationVersion, { state: "confirmed", card: initial.value })
+        : null;
+      if (settled) {
+        commitCard(settled.card, settled.remaining.length === 0);
         if (clearDraftOnConfirm) clearCardDraft(userId, id);
-        setError("");
-        setSyncState("synced");
+        if (!settled.remaining.length) setError("");
+        setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
+          ? "checking"
+          : settled.remaining.length ? "syncing" : "synced");
         if (before.stage !== "done" && patch.stage === "done") {
           setUndoAction({ cardId: id, title: before.title, stage: before.stage });
         }
       }
-      return { card, state: "confirmed" };
+      return {
+        card: settled?.card ?? initial.value,
+        state: lifecycleActive && settled ? "confirmed" : "pending",
+      };
     } catch (reason) {
-      if (operationCoordinator.isCurrentMutation(id, mutationVersion)) {
-        commitCard(preserveCurrentAttachments({ ...before, mutationVersion, pendingConfirmation: false }));
+      const settled = operationCoordinator.isActiveLifecycle(lifecycle)
+        ? settleCardMutation(id, mutationVersion, { state: "failed" })
+        : null;
+      if (settled) {
+        commitCard(settled.card, settled.remaining.length === 0);
         setError(reason instanceof Error ? reason.message : "保存失败");
-        setSyncState(navigator.onLine ? "error" : "offline");
+        setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
+          ? "checking"
+          : settled.remaining.length ? "syncing" : navigator.onLine ? "error" : "offline");
       }
       throw reason;
     } finally {
       if (!finishesInBackground) finishOperation();
     }
-  }, [beginOperation, commitCard, operationCoordinator, userId]);
+  }, [beginOperation, commitCard, operationCoordinator, projectMutationChain, settleCardMutation, userId]);
 
   const uploadFiles = useCallback(async (cardId: number, files: File[]) => {
     const failed: File[] = [];

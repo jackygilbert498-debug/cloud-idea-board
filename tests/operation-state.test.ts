@@ -64,3 +64,18 @@ test("activity stays nonzero until two concurrent operations both finish", () =>
   assert.equal(coordinator.activeCount, 0);
   assert.deepEqual(counts, [1, 2, 1, 0]);
 });
+
+test("disposing a coordinator invalidates mutations and silences late finishes", () => {
+  const counts: number[] = [];
+  const coordinator = new OperationCoordinator((count) => counts.push(count));
+  const lifecycle = coordinator.activate();
+  const version = coordinator.nextMutationVersion(9);
+  const finish = coordinator.beginOperation();
+  assert.equal(coordinator.isCurrentMutation(9, version), true);
+
+  coordinator.dispose(lifecycle);
+  finish();
+
+  assert.equal(coordinator.isCurrentMutation(9, version), false);
+  assert.deepEqual(counts, [1]);
+});

@@ -30,6 +30,8 @@ export async function waitForInitialOutcome<T>(
 /** Tracks process-local mutation ownership and aggregate activity. */
 export class OperationCoordinator {
   private count = 0;
+  private lifecycle = 0;
+  private active = true;
   private readonly mutationVersions = new Map<number, number>();
   private readonly onActivityChange: (count: number) => void;
 
@@ -41,12 +43,36 @@ export class OperationCoordinator {
     return this.count;
   }
 
+  get lifecycleId(): number {
+    return this.lifecycle;
+  }
+
+  isActiveLifecycle(lifecycle: number): boolean {
+    return this.active && lifecycle === this.lifecycle;
+  }
+
+  activate(): number {
+    this.lifecycle += 1;
+    this.active = true;
+    this.count = 0;
+    this.mutationVersions.clear();
+    return this.lifecycle;
+  }
+
+  dispose(lifecycle = this.lifecycle): void {
+    if (lifecycle !== this.lifecycle) return;
+    this.active = false;
+    this.count = 0;
+    this.mutationVersions.clear();
+  }
+
   beginOperation(): () => void {
     let finished = false;
+    const lifecycle = this.lifecycle;
     this.count += 1;
     this.onActivityChange(this.count);
     return () => {
-      if (finished) return;
+      if (finished || !this.active || lifecycle !== this.lifecycle) return;
       finished = true;
       this.count = Math.max(0, this.count - 1);
       this.onActivityChange(this.count);
@@ -60,6 +86,6 @@ export class OperationCoordinator {
   }
 
   isCurrentMutation(cardId: number, version: number): boolean {
-    return this.mutationVersions.get(cardId) === version;
+    return this.active && this.mutationVersions.get(cardId) === version;
   }
 }
