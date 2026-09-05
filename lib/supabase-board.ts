@@ -15,7 +15,7 @@ const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 const ATTACHMENT_RECONCILE_AGE_MS = 15 * 60 * 1000;
 
-type AttachmentState = Exclude<AttachmentRecord["state"], undefined>;
+type AttachmentState = AttachmentRecord["state"];
 type ServiceError = {
   message: string;
   code?: string;
@@ -68,12 +68,99 @@ function fail(error: { message: string } | null, fallback: string): never {
 
 function isStorageNotFound(error: ServiceError | null): boolean {
   if (!error) return false;
-  if ([error.status, error.statusCode, error.code].some((value) => String(value) === "404")) return true;
-  return /(?:not found|does not exist|不存在)/i.test(`${error.message} ${error.error ?? ""}`);
+  return [error.status, error.statusCode, error.code].some((value) => String(value) === "404");
+}
+
+function storageStatus(error: ServiceError | null): number | null {
+  if (!error) return null;
+  for (const value of [error.status, error.statusCode]) {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed)) return parsed;
+  }
+  return null;
+}
+
+function isDefiniteUploadRejection(error: ServiceError): boolean {
+  const status = storageStatus(error);
+  return status !== null && status >= 400 && status < 500 && ![408, 409, 425, 429].includes(status);
 }
 
 function reportCompensationFailure(operation: string, error: ServiceError | null): void {
   if (error) console.warn(`${operation}，后台恢复流程稍后会重试：${error.message}`);
+}
+
+type AttachmentSnapshot = Pick<DbAttachment, "id" | "user_id" | "object_key" | "state" | "updated_at">;
+
+async function readAttachment(id: string, userId: string): Promise<{ data: AttachmentSnapshot | null; error: ServiceError | null }> {
+  const { data, error } = await requireSupabase()
+    .from("attachments")
+    .select("id, user_id, object_key, state, updated_at")
+    .eq("id", id)
+    .eq("user_id", userId)
+    .maybeSingle();
+  return { data: data as AttachmentSnapshot | null, error };
+}
+
+async function transitionAttachment(
+  id: string,
+  userId: string,
+  from: AttachmentState,
+  to: AttachmentState,
+  expectedUpdatedAt?: string,
+): Promise<{ data: AttachmentSnapshot | null; error: ServiceError | null; applied: boolean }> {
+  let update = requireSupabase()
+    .from("attachments")
+    .update({ state: to })
+    .eq("id", id)
+    .eq("user_id", userId)
+    .eq("state", from);
+  if (expectedUpdatedAt !== undefined) update = update.eq("updated_at", expectedUpdatedAt);
+  const { data, error } = await update.select("id, user_id, object_key, state, updated_at").maybeSingle();
+  if (!error && data) return { data: data as AttachmentSnapshot, error: null, applied: true };
+  const current = await readAttachment(id, userId);
+  return { data: current.data, error: current.error ?? error, applied: false };
+}
+
+async function deleteAttachmentMetadata(
+  id: string,
+  userId: string,
+  state: AttachmentState,
+): Promise<{ deleted: boolean; data: AttachmentSnapshot | null; error: ServiceError | null }> {
+  const { data, error } = await requireSupabase()
+    .from("attachments")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", userId)
+    .eq("state", state)
+    .select("id")
+    .maybeSingle();
+  if (error) {
+    const current = await readAttachment(id, userId);
+    if (!current.error && current.data === null) return { deleted: true, data: null, error: null };
+    return { deleted: false, data: current.data, error: current.error ?? error };
+  }
+  if (data) return { deleted: true, data: null, error: null };
+  const current = await readAttachment(id, userId);
+  return { deleted: current.data === null && current.error === null, ...current };
+}
+
+async function probeStorageObject(
+  bucket: ReturnType<ReturnType<typeof requireSupabase>["storage"]["from"]>,
+  objectKey: string,
+): Promise<{ result: "exists" | "missing" | "unknown"; error: ServiceError | null }> {
+  try {
+    const { data, error } = await bucket.exists(objectKey);
+    if (data === true && !error) return { result: "exists", error: null };
+    if (data === false && error && [400, 404].includes(storageStatus(error) ?? -1)) {
+      return { result: "missing", error: null };
+    }
+    return { result: "unknown", error };
+  } catch (reason) {
+    return {
+      result: "unknown",
+      error: reason instanceof Error ? { message: reason.message } : { message: "对象状态探测失败" },
+    };
+  }
 }
 
 function mapAttachment(row: DbAttachment): AttachmentRecord {
@@ -305,7 +392,7 @@ export async function uploadBoardAttachment(cardId: number, file: File): Promise
   const attachmentId = crypto.randomUUID();
   const filename = (file.name.normalize("NFKC").replace(/[\\/\0\r\n]/g, "_").trim() || "screenshot").slice(0, 180);
   const objectKey = `${userData.user.id}/${cardId}/${attachmentId}/${filename}`;
-  const { error: insertError } = await client.from("attachments").insert({
+  const pendingRow = {
     id: attachmentId,
     card_id: cardId,
     user_id: userData.user.id,
@@ -314,8 +401,9 @@ export async function uploadBoardAttachment(cardId: number, file: File): Promise
     content_type: file.type,
     size: file.size,
     sort_order: (last?.sort_order ?? -1) + 1,
-    state: "pending",
-  });
+    state: "pending" as const,
+  };
+  const { error: insertError } = await client.from("attachments").insert(pendingRow);
   if (insertError) fail(insertError, "截图保存失败");
 
   const { error: uploadError } = await client.storage.from(SCREENSHOT_BUCKET).upload(objectKey, file, {
@@ -323,34 +411,30 @@ export async function uploadBoardAttachment(cardId: number, file: File): Promise
     upsert: false,
   });
   if (uploadError) {
-    const { error: cleanupError } = await client.from("attachments")
-      .delete()
-      .eq("id", attachmentId)
-      .eq("user_id", userData.user.id)
-      .eq("state", "pending");
-    reportCompensationFailure("截图上传失败后的元数据清理也失败", cleanupError);
+    if (isDefiniteUploadRejection(uploadError)) {
+      const cleanup = await deleteAttachmentMetadata(attachmentId, userData.user.id, "pending");
+      if (cleanup.data?.state === "ready") return;
+      reportCompensationFailure("截图上传失败后的元数据清理也失败", cleanup.error);
+    }
     fail(uploadError, "截图上传失败");
   }
 
-  const { error: readyError } = await client.from("attachments")
-    .update({ state: "ready" })
-    .eq("id", attachmentId)
-    .eq("user_id", userData.user.id)
-    .eq("state", "pending");
-  if (readyError) {
-    const { error: removeError } = await client.storage.from(SCREENSHOT_BUCKET).remove([objectKey]);
-    if (!removeError || isStorageNotFound(removeError)) {
-      const { error: cleanupError } = await client.from("attachments")
-        .delete()
-        .eq("id", attachmentId)
-        .eq("user_id", userData.user.id)
-        .eq("state", "pending");
-      reportCompensationFailure("截图状态保存失败后的元数据清理也失败", cleanupError);
-    } else {
-      reportCompensationFailure("截图状态保存失败后的对象清理也失败", removeError);
+  const ready = await transitionAttachment(attachmentId, userData.user.id, "pending", "ready");
+  if (ready.data?.state === "ready") return;
+
+  const primaryError = ready.error ?? { message: "截图状态保存冲突，请稍后重试" };
+  if (ready.data === null && ready.error === null) {
+    // A stale reconciler may have removed the pending row while this upload was
+    // still in flight. Re-establish metadata before returning so the object can
+    // never become an unrecoverable orphan.
+    const { error: recoveryError } = await client.from("attachments").insert(pendingRow);
+    if (recoveryError) {
+      const final = await readAttachment(attachmentId, userData.user.id);
+      if (final.data?.state === "ready") return;
+      reportCompensationFailure("截图状态冲突后的待恢复元数据重建失败", recoveryError);
     }
-    fail(readyError, "截图保存失败");
   }
+  fail(primaryError, "截图状态保存失败");
 }
 
 export async function reorderBoardAttachments(cardId: number, attachmentIds: string[]): Promise<void> {
@@ -366,30 +450,26 @@ export async function deleteBoardAttachment(attachment: AttachmentRecord): Promi
   if (!attachment.objectKey) throw new Error("截图路径无效");
   const { data: userData, error: userError } = await client.auth.getUser();
   if (userError || !userData.user) fail(userError, "登录状态已失效");
-  const { error: deletingError } = await client.from("attachments")
-    .update({ state: "deleting" })
-    .eq("id", attachment.id)
-    .eq("user_id", userData.user.id)
-    .eq("state", "ready");
-  if (deletingError) fail(deletingError, "截图删除准备失败");
+  const deleting = await transitionAttachment(attachment.id, userData.user.id, "ready", "deleting");
+  if (!deleting.data) return;
+  if (deleting.data.state !== "deleting") {
+    if (deleting.error) fail(deleting.error, "截图删除准备失败");
+    throw new Error("截图状态已变化，请刷新后重试");
+  }
 
   const { error: storageError } = await client.storage.from(SCREENSHOT_BUCKET).remove([attachment.objectKey]);
   if (storageError && !isStorageNotFound(storageError)) {
-    const { error: rollbackError } = await client.from("attachments")
-      .update({ state: "ready" })
-      .eq("id", attachment.id)
-      .eq("user_id", userData.user.id)
-      .eq("state", "deleting");
-    reportCompensationFailure("截图对象删除失败后的状态回滚也失败", rollbackError);
-    fail(storageError, "截图删除失败");
+    const probe = await probeStorageObject(client.storage.from(SCREENSHOT_BUCKET), attachment.objectKey);
+    if (probe.result === "exists") {
+      const rollback = await transitionAttachment(attachment.id, userData.user.id, "deleting", "ready");
+      if (rollback.data?.state !== "ready") reportCompensationFailure("截图对象删除失败后的状态回滚也失败", rollback.error);
+      fail(storageError, "截图删除失败");
+    }
+    if (probe.result === "unknown") fail(storageError, "截图删除结果暂时无法确认");
   }
   clearAttachmentUrlCache(attachment.objectKey);
-  const { error: metadataError } = await client.from("attachments")
-    .delete()
-    .eq("id", attachment.id)
-    .eq("user_id", userData.user.id)
-    .eq("state", "deleting");
-  if (metadataError) fail(metadataError, "截图记录删除失败");
+  const metadata = await deleteAttachmentMetadata(attachment.id, userData.user.id, "deleting");
+  if (!metadata.deleted) fail(metadata.error, "截图记录删除失败");
 }
 
 /** Repair stale interrupted attachment operations without exposing partial rows. */
@@ -410,38 +490,44 @@ export async function reconcileBoardAttachments(): Promise<void> {
   const bucket = client.storage.from(SCREENSHOT_BUCKET);
   for (const row of (data ?? []) as DbAttachment[]) {
     if (row.state === "pending") {
-      const { data: object, error: downloadError } = await bucket.download(row.object_key);
-      if (!downloadError && object) {
-        const { error: readyError } = await client.from("attachments")
-          .update({ state: "ready" })
-          .eq("id", row.id)
-          .eq("user_id", userData.user.id)
-          .eq("state", "pending");
-        if (readyError) failures.push(readyError);
-      } else if (isStorageNotFound(downloadError)) {
-        const { error: cleanupError } = await client.from("attachments")
-          .delete()
-          .eq("id", row.id)
-          .eq("user_id", userData.user.id)
-          .eq("state", "pending");
-        if (cleanupError) failures.push(cleanupError);
-      } else if (downloadError) {
-        failures.push(downloadError);
+      // Claim the stale row before probing. A still-running uploader can only
+      // observe deleting/missing afterwards and must not publish ready blindly.
+      const claim = await transitionAttachment(row.id, userData.user.id, "pending", "deleting", row.updated_at);
+      if (!claim.applied || claim.data?.state !== "deleting") {
+        if (claim.error) failures.push(claim.error);
+        continue;
+      }
+      const probe = await probeStorageObject(bucket, row.object_key);
+      if (probe.result === "exists") {
+        const ready = await transitionAttachment(row.id, userData.user.id, "deleting", "ready");
+        if (ready.data?.state !== "ready") {
+          const release = await transitionAttachment(row.id, userData.user.id, "deleting", "pending");
+          failures.push(ready.error ?? release.error ?? { message: "截图恢复状态冲突" });
+        }
+      } else if (probe.result === "missing") {
+        const cleanup = await deleteAttachmentMetadata(row.id, userData.user.id, "deleting");
+        if (!cleanup.deleted) failures.push(cleanup.error ?? { message: "截图恢复清理冲突" });
+      } else {
+        const release = await transitionAttachment(row.id, userData.user.id, "deleting", "pending");
+        failures.push(probe.error ?? release.error ?? { message: "截图对象状态无法确认" });
       }
       continue;
     }
 
     const { error: removeError } = await bucket.remove([row.object_key]);
     if (removeError && !isStorageNotFound(removeError)) {
-      failures.push(removeError);
-      continue;
+      const probe = await probeStorageObject(bucket, row.object_key);
+      if (probe.result === "exists") {
+        failures.push(removeError);
+        continue;
+      }
+      if (probe.result === "unknown") {
+        failures.push(probe.error ?? removeError);
+        continue;
+      }
     }
-    const { error: cleanupError } = await client.from("attachments")
-      .delete()
-      .eq("id", row.id)
-      .eq("user_id", userData.user.id)
-      .eq("state", "deleting");
-    if (cleanupError) failures.push(cleanupError);
+    const cleanup = await deleteAttachmentMetadata(row.id, userData.user.id, "deleting");
+    if (!cleanup.deleted) failures.push(cleanup.error ?? { message: "截图删除恢复冲突" });
     else clearAttachmentUrlCache(row.object_key);
   }
   if (failures.length) fail(failures[0], "未完成的截图操作将在稍后重试");

@@ -88,6 +88,7 @@ function syncLabel(state: SyncState): { label: string; icon: React.ReactNode } {
 }
 
 export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; displayName: string; onSignOut: () => void }) {
+  const [initialComposerDraft] = useState(() => readCardDraft(userId, "composer"));
   const [cards, setCards] = useState<CardRecord[]>(() => readBoardCache(userId));
   const [view, setView] = useState<View>("board");
   const [mobileStage, setMobileStage] = useState<Stage>("idea");
@@ -98,14 +99,13 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const [saving, setSaving] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>(() => navigator.onLine ? "syncing" : "offline");
   const [error, setError] = useState("");
-  const [composer, setComposer] = useState(() => readCardDraft(userId, "composer")?.title ?? "");
+  const [composer, setComposer] = useState(() => initialComposerDraft?.title ?? "");
+  const [composerRequestId, setComposerRequestId] = useState(() => initialComposerDraft?.clientRequestId ?? crypto.randomUUID());
   const [editorDraftPresent, setEditorDraftPresent] = useState(false);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const cardsRef = useRef(cards);
   const mutationVersionRef = useRef(new Map<number, number>());
-  const composerRequestIdRef = useRef(crypto.randomUUID());
-  const editorRequestIdRef = useRef(crypto.randomUUID());
 
   const commitCards = useCallback((next: CardRecord[]) => {
     cardsRef.current = next;
@@ -182,9 +182,10 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       aiPromptVersion: null,
       aiOrganizedAt: null,
       stage: "idea",
+      clientRequestId: composerRequestId,
     });
     else clearCardDraft(userId, "composer");
-  }, [composer, userId]);
+  }, [composer, composerRequestId, userId]);
   useEffect(() => {
     if (!undoAction) return;
     const timer = setTimeout(() => setUndoAction(null), UNDO_DURATION);
@@ -291,8 +292,6 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         commitCard(createdCard);
         setSyncState("synced");
       }
-      setComposer("");
-      clearCardDraft(userId, "composer");
       if (failed.length) setError(`构思已保存，部分截图未上传：${failed.join("；")}`);
       return createdCard;
     } catch (reason) {
@@ -303,29 +302,28 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     } finally {
       setSaving(false);
     }
-  }, [commitCard, load, userId]);
+  }, [commitCard, load]);
 
   const createFromComposer = useCallback(async () => {
-    const created = await create(composer, "idea", [], {}, composerRequestIdRef.current);
-    if (created) composerRequestIdRef.current = crypto.randomUUID();
-  }, [composer, create]);
-
-  const createFromEditor = useCallback(async (
-    title: string,
-    stage: Stage = "idea",
-    files: File[] = [],
-    details: CardCreateDetails = {},
-  ) => {
-    const created = await create(title, stage, files, details, editorRequestIdRef.current);
-    if (created) editorRequestIdRef.current = crypto.randomUUID();
-    return created;
-  }, [create]);
+    const created = await create(composer, "idea", [], {}, composerRequestId);
+    if (created) {
+      setComposer("");
+      clearCardDraft(userId, "composer");
+      setComposerRequestId(crypto.randomUUID());
+    }
+  }, [composer, composerRequestId, create, userId]);
 
   const removeAttachment = useCallback(async (attachment: AttachmentRecord) => {
     setSaving(true);
     setSyncState(navigator.onLine ? "syncing" : "offline");
     try { if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再删除截图"); await deleteBoardAttachment(attachment); await load(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "截图删除失败"); setSyncState(navigator.onLine ? "error" : "offline"); }
+    catch (reason) {
+      const message = reason instanceof Error ? reason.message : "截图删除失败";
+      if (navigator.onLine) await load();
+      // load() clears its own notice on success, so restore the mutation error last.
+      setError(message);
+      setSyncState(navigator.onLine ? "error" : "offline");
+    }
     finally { setSaving(false); }
   }, [load]);
 
@@ -383,9 +381,9 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       {loading ? <LoadingState /> : view === "board" ? <Board cards={activeCards} mobileStage={mobileStage} onOpen={setSelected} onMove={(card, stage) => { void mutate(card.id, { stage }).catch(() => undefined); }} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} onOpenArchive={() => setView("archive")} /> : view === "archive" ? <ArchiveView groups={archiveGroups} onOpen={setSelected} onRestore={(card) => void restore(card)} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} /> : <ListView cards={listCards} onOpen={setSelected} />}
     </section>
 
-    <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void createFromComposer(); }}><input value={composer} onChange={(event) => { const next = event.target.value; if (composer.trim() && !next.trim()) composerRequestIdRef.current = crypto.randomUUID(); setComposer(next); }} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>
+    <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void createFromComposer(); }}><input value={composer} onChange={(event) => { const next = event.target.value; if (composer.trim() && !next.trim()) setComposerRequestId(crypto.randomUUID()); setComposer(next); }} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>
     {undoAction && <div className="undo-toast" role="status"><Check size={16} /><span>“{undoAction.title}”已完成</span><button onClick={() => void undoCompletion()}><RotateCcw size={14} />撤销</button></div>}
-    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} onClose={() => setSelected(null)} onCancel={() => { editorRequestIdRef.current = crypto.randomUUID(); setSelected(null); }} onCreate={createFromEditor} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
+    {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} onClose={() => setSelected(null)} onCreate={create} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
     {viewer && <ImageViewer attachments={viewer.attachments} initialIndex={viewer.index} onClose={() => setViewer(null)} />}
   </main>;
 }
@@ -451,13 +449,12 @@ function PendingPreview({ file, onRemove }: { file: File; onRemove: () => void }
   return <figure className="pending-preview">{url && <img src={url} alt={file.name} />}<figcaption title={file.name}>{file.name}</figcaption><button type="button" onClick={onRemove} aria-label={`移除 ${file.name}`}><X size={14} /></button></figure>;
 }
 
-function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
+function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles, onReorder, onDeleteAttachment, onViewImage, onDraftStateChange }: {
   userId: string;
   card: CardRecord | null;
   saving: boolean;
   onClose: () => void;
-  onCancel: () => void;
-  onCreate: (title: string, stage?: Stage, files?: File[], details?: CardCreateDetails) => Promise<CardRecord | undefined>;
+  onCreate: (title: string, stage: Stage, files: File[], details: CardCreateDetails, clientRequestId: string) => Promise<CardRecord | undefined>;
   onSave: (id: number, patch: CardPatch) => Promise<CardRecord>;
   onUploadFiles: (id: number, files: File[]) => Promise<File[]>;
   onReorder: (id: number, attachmentIds: string[]) => Promise<void>;
@@ -467,6 +464,7 @@ function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onU
 }) {
   const draftId = card?.id ?? "new";
   const [restoredDraft] = useState<CardDraft | null>(() => readCardDraft(userId, draftId));
+  const clientRequestIdRef = useRef(restoredDraft?.clientRequestId ?? crypto.randomUUID());
   const [title, setTitle] = useState(() => restoredDraft?.title ?? card?.title ?? "");
   const [criteria, setCriteria] = useState(() => restoredDraft?.criteria ?? card?.criteria ?? "");
   const [result, setResult] = useState(() => restoredDraft?.result ?? card?.result ?? "");
@@ -505,6 +503,7 @@ function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onU
         aiPromptVersion,
         aiOrganizedAt,
         stage,
+        clientRequestId: clientRequestIdRef.current,
       });
     } else clearCardDraft(userId, draftId);
     onDraftStateChange(dirty || pendingFiles.length > 0);
@@ -546,7 +545,7 @@ function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onU
     const canSyncInBackground = pendingFiles.length === 0;
     try {
       if (!card) {
-        const creation = onCreate(cleanTitle, targetStage, pendingFiles, details);
+        const creation = onCreate(cleanTitle, targetStage, pendingFiles, details, clientRequestIdRef.current);
         if (canSyncInBackground) onClose();
         const created = await creation;
         if (!created) return;
@@ -565,6 +564,15 @@ function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onU
     } catch {
       // The board shell presents the cloud error; the local draft remains available for retry.
     }
+  };
+  const cancel = () => {
+    if (!card && (title.trim() || originalText.trim())) {
+      writeCardDraft(userId, draftId, {
+        title, criteria, result, originalText, organizedText, aiAnalysis, aiModel,
+        aiPromptVersion, aiOrganizedAt, stage, clientRequestId: crypto.randomUUID(),
+      });
+    }
+    onClose();
   };
   const moveAttachment = async (id: string, direction: -1 | 1) => {
     if (!card) return;
@@ -600,7 +608,7 @@ function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onU
   const advance = nextStage(stage);
 
   return <div className="editor-backdrop"><aside className="editor" role="dialog" aria-modal="true" aria-label={card ? "编辑记录" : "新建构思"} onPaste={pasteAttachment} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}>
-    <header><div><span className={`stage-dot ${stage}`} /><p>{card ? `#${String(card.id).padStart(4, "0")}` : "NEW IDEA"}</p></div><button onClick={onCancel} aria-label="关闭"><X size={19} /></button></header>
+    <header><div><span className={`stage-dot ${stage}`} /><p>{card ? `#${String(card.id).padStart(4, "0")}` : "NEW IDEA"}</p></div><button onClick={cancel} aria-label="关闭"><X size={19} /></button></header>
     <div className="editor-scroll">
       {restoredDraft && <div className="draft-restored"><FilePenLine size={14} />已恢复上次未保存的文字</div>}
       <label className="field title-field"><span>标题</span><textarea value={title} onChange={(event) => setTitle(event.target.value)} placeholder="记下你正在想的事…" maxLength={240} rows={2} /></label>
@@ -619,6 +627,6 @@ function Editor({ userId, card, saving, onClose, onCancel, onCreate, onSave, onU
       </section>
       {card && <div className="editor-options">{card.stage !== "done" && !card.archived && <button onClick={() => { void onSave(card.id, { focus: !card.focus }).catch(() => undefined); }}><Star size={16} fill={card.focus ? "currentColor" : "none"} />{card.focus ? "移出今日焦点" : "设为今日焦点"}</button>}<button onClick={() => { void onSave(card.id, { reference: !card.reference }).catch(() => undefined); }}><FileText size={16} />{card.reference ? "取消参考" : "标记为参考"}</button>{(card.stage === "done" || card.archived) ? <button onClick={() => { void onSave(card.id, { stage: restoreStage(card), archived: false }).catch(() => undefined); }}><RotateCcw size={16} />恢复处理</button> : <button onClick={() => { void onSave(card.id, { archived: true }).catch(() => undefined); }}><Archive size={16} />归档</button>}</div>}
     </div>
-    <footer><button className="secondary" onClick={onClose}>关闭</button>{card && advance && <button className="advance desktop-only" onClick={() => void persist(advance)}><span>保存并推进至</span>{STAGE_META[advance].label}<ChevronRight size={15} /></button>}<button className="primary" disabled={saving || (!title.trim() && !originalText.trim())} onClick={() => void persist()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存</button></footer>
+    <footer><button className="secondary" onClick={cancel}>关闭</button>{card && advance && <button className="advance desktop-only" onClick={() => void persist(advance)}><span>保存并推进至</span>{STAGE_META[advance].label}<ChevronRight size={15} /></button>}<button className="primary" disabled={saving || (!title.trim() && !originalText.trim())} onClick={() => void persist()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存</button></footer>
   </aside></div>;
 }

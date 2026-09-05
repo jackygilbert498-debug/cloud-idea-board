@@ -43,9 +43,7 @@ export type AttachmentRecord = {
   contentType: string;
   size: number;
   sortOrder: number;
-  // Optional only for compatibility with local caches written before the state
-  // machine existed; every record mapped from Supabase carries an explicit state.
-  state?: AttachmentState;
+  state: AttachmentState;
   createdAt: string;
   url?: string;
 };
@@ -85,6 +83,7 @@ export type CardDraft = {
   aiPromptVersion: string | null;
   aiOrganizedAt: string | null;
   stage: Stage;
+  clientRequestId?: string;
   savedAt: string;
 };
 

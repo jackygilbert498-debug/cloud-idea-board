@@ -76,7 +76,7 @@ test("archive groups records into today, yesterday, this week and earlier", () =
 test("search includes padded number and attachment filename", () => {
   const item = card(12, "idea", "2026-08-24T08:00:00+08:00", {
     title: "视频分镜工具",
-    attachments: [{ id: "a", cardId: 12, filename: "参考线.PNG", contentType: "image/png", size: 20, sortOrder: 0, createdAt: "2026-08-24T08:00:00+08:00" }],
+    attachments: [{ id: "a", cardId: 12, filename: "参考线.PNG", contentType: "image/png", size: 20, sortOrder: 0, state: "ready", createdAt: "2026-08-24T08:00:00+08:00" }],
   });
   assert.equal(matchesCard(item, "0012"), true);
   assert.equal(matchesCard(item, "参考线.png"), true);

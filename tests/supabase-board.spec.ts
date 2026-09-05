@@ -63,6 +63,7 @@ import {
   uploadBoardAttachment,
 } from "@/lib/supabase-board";
 import { IdeaBoard } from "@/app/components/IdeaBoard";
+import { boardCacheKey, draftKey, readBoardCache, writeBoardCache } from "@/lib/local-state";
 import type { AttachmentRecord } from "@/lib/types";
 
 const USER_ID = "00000000-0000-4000-8000-000000000001";
@@ -136,11 +137,13 @@ class FakeQuery implements PromiseLike<QueryResult> {
   private wantsCount = false;
   private head = false;
   private selectedColumns = "*";
+  private returnsRows = false;
 
   constructor(private readonly client: FakeSupabase, private readonly table: "cards" | "attachments") {}
 
   select(columns = "*", options?: { count?: string; head?: boolean }): this {
     this.selectedColumns = columns;
+    this.returnsRows = true;
     this.wantsCount = options?.count === "exact";
     this.head = options?.head === true;
     return this;
@@ -288,9 +291,20 @@ class FakeQuery implements PromiseLike<QueryResult> {
       return this.shape([inserted]);
     }
 
+    if (this.operation === "update" && this.table === "attachments" && this.client.beforeAttachmentStateUpdateOnce) {
+      const beforeUpdate = this.client.beforeAttachmentStateUpdateOnce;
+      this.client.beforeAttachmentStateUpdateOnce = null;
+      beforeUpdate();
+    }
     const rows = this.visibleRows();
     if (this.operation === "update") {
       const state = this.values.state as AttachmentState | undefined;
+      if (this.table === "attachments" && state && this.client.zeroAttachmentStateOnce === state) {
+        this.client.zeroAttachmentStateOnce = null;
+        this.client.onZeroAttachmentState?.(state);
+        this.client.onZeroAttachmentState = null;
+        return this.shape([]);
+      }
       if (this.table === "attachments" && state && this.client.failAttachmentStateOnce === state) {
         this.client.failAttachmentStateOnce = null;
         return { data: null, error: error(`cannot mark ${state}`) };
@@ -299,9 +313,17 @@ class FakeQuery implements PromiseLike<QueryResult> {
         Object.assign(row, this.values, { updated_at: NOW.toISOString() });
       }
       if (this.table === "attachments" && state) this.client.trace.push(`db:attachments:update:${state}`);
+      if (this.table === "attachments" && state && this.client.afterCommitAttachmentStateErrorOnce === state) {
+        this.client.afterCommitAttachmentStateErrorOnce = null;
+        return { data: null, error: error(`lost ${state} response`) };
+      }
       return this.shape(rows);
     }
 
+    if (this.table === "attachments" && this.client.zeroAttachmentDeleteOnce) {
+      this.client.zeroAttachmentDeleteOnce = false;
+      return this.returnsRows ? this.shape([]) : { data: null, error: null };
+    }
     if (this.table === "attachments" && this.client.failAttachmentDeleteOnce) {
       this.client.failAttachmentDeleteOnce = false;
       return { data: null, error: error("metadata delete failed") };
@@ -312,7 +334,11 @@ class FakeQuery implements PromiseLike<QueryResult> {
       if (index >= 0) source.splice(index, 1);
     }
     if (this.table === "attachments") this.client.trace.push("db:attachments:delete");
-    return { data: null, error: null };
+    if (this.table === "attachments" && this.client.afterCommitAttachmentDeleteErrorOnce) {
+      this.client.afterCommitAttachmentDeleteErrorOnce = false;
+      return { data: null, error: error("lost metadata delete response") };
+    }
+    return this.returnsRows ? this.shape(rows) : { data: null, error: null };
   }
 }
 
@@ -328,10 +354,19 @@ class FakeSupabase {
   cardInsertErrorOnce: FakeError | null = null;
   readonly cardInsertAttempts: string[] = [];
   uploadError: FakeError | null = null;
+  uploadAfterCommitError: FakeError | null = null;
   removeErrors = new Map<string, FakeError>();
+  removeAfterCommitErrors = new Map<string, FakeError>();
+  existsErrors = new Map<string, FakeError>();
   downloadErrors = new Map<string, FakeError>();
   failAttachmentStateOnce: AttachmentState | null = null;
+  afterCommitAttachmentStateErrorOnce: AttachmentState | null = null;
+  zeroAttachmentStateOnce: AttachmentState | null = null;
+  onZeroAttachmentState: ((state: AttachmentState) => void) | null = null;
+  beforeAttachmentStateUpdateOnce: (() => void) | null = null;
   failAttachmentDeleteOnce = false;
+  afterCommitAttachmentDeleteErrorOnce = false;
+  zeroAttachmentDeleteOnce = false;
   rpcError: FakeError | null = null;
 
   readonly auth = {
@@ -346,6 +381,7 @@ class FakeSupabase {
           this.trace.push(`storage:upload:${objectKey}`);
           if (this.uploadError) return { data: null, error: this.uploadError };
           this.objects.add(objectKey);
+          if (this.uploadAfterCommitError) return { data: null, error: this.uploadAfterCommitError };
           return { data: { path: objectKey }, error: null };
         },
         remove: async (objectKeys: string[]) => {
@@ -357,7 +393,16 @@ class FakeSupabase {
             return { data: null, error: error("Object not found", { statusCode: "404" }) };
           }
           this.objects.delete(objectKey);
+          const afterCommit = this.removeAfterCommitErrors.get(objectKey);
+          if (afterCommit) return { data: null, error: afterCommit };
           return { data: [{ name: objectKey }], error: null };
+        },
+        exists: async (objectKey: string) => {
+          this.trace.push(`storage:exists:${objectKey}`);
+          const configured = this.existsErrors.get(objectKey);
+          if (configured) return { data: false, error: configured };
+          if (this.objects.has(objectKey)) return { data: true, error: null };
+          return { data: false, error: error("Object not found", { statusCode: "404" }) };
         },
         download: async (objectKey: string) => {
           this.trace.push(`storage:download:${objectKey}`);
@@ -428,7 +473,7 @@ describe("attachment state machine", () => {
   });
 
   test("upload exposes no ready metadata and compensates a failed object write", async () => {
-    fakeClient.uploadError = error("上传失败");
+    fakeClient.uploadError = error("上传失败", { statusCode: "413" });
     const image = new File(["test"], "image.png", { type: "image/png" });
 
     await expect(uploadBoardAttachment(7, image)).rejects.toThrow(/上传失败/);
@@ -438,14 +483,44 @@ describe("attachment state machine", () => {
     expect(fakeClient.objects).toHaveLength(0);
   });
 
-  test("ready transition failure removes the uploaded object without hiding the primary error", async () => {
+  test("an upload response lost after commit leaves object and pending metadata recoverable", async () => {
+    fakeClient.uploadAfterCommitError = error("connection closed before response");
+    const image = new File(["test"], "image.png", { type: "image/png" });
+
+    await expect(uploadBoardAttachment(7, image)).rejects.toThrow("connection closed before response");
+
+    expect(fakeClient.objects).toHaveLength(1);
+    expect(fakeClient.attachments).toEqual([expect.objectContaining({ id: A_ID, state: "pending" })]);
+  });
+
+  test("a ready update response lost after commit is accepted after owner-scoped reread", async () => {
+    fakeClient.afterCommitAttachmentStateErrorOnce = "ready";
+    const image = new File(["test"], "image.png", { type: "image/png" });
+
+    await uploadBoardAttachment(7, image);
+
+    expect(fakeClient.objects).toHaveLength(1);
+    expect(fakeClient.attachments).toEqual([expect.objectContaining({ id: A_ID, state: "ready" })]);
+  });
+
+  test("a zero-row ready CAS after stale cleanup recreates pending metadata instead of orphaning the object", async () => {
+    fakeClient.zeroAttachmentStateOnce = "ready";
+    fakeClient.onZeroAttachmentState = () => { fakeClient.attachments.splice(0); };
+    const image = new File(["test"], "image.png", { type: "image/png" });
+
+    await expect(uploadBoardAttachment(7, image)).rejects.toThrow(/截图状态/);
+
+    expect(fakeClient.objects).toHaveLength(1);
+    expect(fakeClient.attachments).toEqual([expect.objectContaining({ id: A_ID, state: "pending" })]);
+  });
+
+  test("ready transition failure keeps the uploaded object with pending metadata", async () => {
     fakeClient.failAttachmentStateOnce = "ready";
-    fakeClient.failAttachmentDeleteOnce = true;
     const image = new File(["test"], "image.png", { type: "image/png" });
 
     await expect(uploadBoardAttachment(7, image)).rejects.toThrow("cannot mark ready");
 
-    expect(fakeClient.objects).toHaveLength(0);
+    expect(fakeClient.objects).toHaveLength(1);
     expect(fakeClient.attachments).toEqual([
       expect.objectContaining({ id: A_ID, state: "pending" }),
     ]);
@@ -461,9 +536,10 @@ describe("attachment state machine", () => {
 
     expect(row.state).toBe("ready");
     expect(fakeClient.objects.has(row.object_key)).toBe(true);
-    expect(fakeClient.trace.slice(0, 3)).toEqual([
+    expect(fakeClient.trace.slice(0, 4)).toEqual([
       "db:attachments:update:deleting",
       `storage:remove:${row.object_key}`,
+      `storage:exists:${row.object_key}`,
       "db:attachments:update:ready",
     ]);
   });
@@ -478,6 +554,43 @@ describe("attachment state machine", () => {
 
     expect(row.state).toBe("deleting");
     expect(fakeClient.objects.has(row.object_key)).toBe(false);
+  });
+
+  test("a metadata delete response lost after commit is accepted after owner-scoped reread", async () => {
+    const row = attachment(A_ID, "ready");
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.afterCommitAttachmentDeleteErrorOnce = true;
+
+    await deleteBoardAttachment(asRecord(row));
+
+    expect(fakeClient.objects.has(row.object_key)).toBe(false);
+    expect(fakeClient.attachments).toHaveLength(0);
+  });
+
+  test("a remove response lost after commit probes absence and completes metadata deletion", async () => {
+    const row = attachment(A_ID, "ready");
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.removeAfterCommitErrors.set(row.object_key, error("connection closed before response"));
+
+    await deleteBoardAttachment(asRecord(row));
+
+    expect(fakeClient.objects.has(row.object_key)).toBe(false);
+    expect(fakeClient.attachments).toHaveLength(0);
+  });
+
+  test("an indeterminate remove and indeterminate existence probe preserve deleting state", async () => {
+    const row = attachment(A_ID, "ready");
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.removeErrors.set(row.object_key, error("Object not found after connection reset"));
+    fakeClient.existsErrors.set(row.object_key, error("probe timed out", { statusCode: "503" }));
+
+    await expect(deleteBoardAttachment(asRecord(row))).rejects.toThrow("Object not found after connection reset");
+
+    expect(row.state).toBe("deleting");
+    expect(fakeClient.objects.has(row.object_key)).toBe(true);
   });
 
   test("reconcile repairs only stale non-ready rows for the current user and tolerates storage 404", async () => {
@@ -511,6 +624,66 @@ describe("attachment state machine", () => {
     expect(fakeClient.attachments.map((item) => item.id)).not.toContain(deletingWithObject.id);
     expect(fakeClient.objects.has(deletingWithObject.object_key)).toBe(false);
   });
+
+  test("reconcile does not claim a stale pending row touched by an active upload", async () => {
+    const active = attachment(A_ID, "pending");
+    fakeClient.attachments.push(active);
+    fakeClient.beforeAttachmentStateUpdateOnce = () => { active.updated_at = FRESH; };
+
+    await reconcileBoardAttachments();
+
+    expect(active).toEqual(expect.objectContaining({ state: "pending", updated_at: FRESH }));
+    expect(fakeClient.attachments).toContain(active);
+    expect(fakeClient.trace.some((item) => item.startsWith("storage:"))).toBe(false);
+  });
+
+  test("reconcile never promotes deleting state owned by a concurrent delete", async () => {
+    const activeDelete = attachment(A_ID, "pending");
+    fakeClient.attachments.push(activeDelete);
+    fakeClient.objects.add(activeDelete.object_key);
+    fakeClient.beforeAttachmentStateUpdateOnce = () => {
+      activeDelete.state = "deleting";
+      activeDelete.updated_at = NOW.toISOString();
+    };
+
+    await reconcileBoardAttachments();
+
+    expect(activeDelete.state).toBe("deleting");
+    expect(fakeClient.objects.has(activeDelete.object_key)).toBe(true);
+    expect(fakeClient.trace.some((item) => item.startsWith("storage:"))).toBe(false);
+  });
+});
+
+describe("local attachment cache boundary", () => {
+  test("legacy cache promotes missing state to ready and filters partial states", () => {
+    const legacy = asRecord(attachment(A_ID, "ready"));
+    const legacyWire: Record<string, unknown> = { ...legacy };
+    delete legacyWire.state;
+    const cached = { ...recordCard(7), attachments: [
+      legacyWire,
+      asRecord(attachment(B_ID, "pending")),
+      asRecord(attachment("10000000-0000-4000-8000-000000000003", "deleting")),
+    ] };
+    localStorage.setItem(boardCacheKey(USER_ID), JSON.stringify([cached]));
+
+    const [restored] = readBoardCache(USER_ID);
+
+    expect(restored.attachments).toEqual([expect.objectContaining({ id: A_ID, state: "ready" })]);
+  });
+
+  test("cache writes only ready attachments and strips signed URLs", () => {
+    const ready = { ...asRecord(attachment(A_ID, "ready")), url: "https://signed.example/secret" };
+    const pending = asRecord(attachment(B_ID, "pending"));
+
+    writeBoardCache(USER_ID, [recordCard(7, [ready, pending])]);
+
+    const serialized = localStorage.getItem(boardCacheKey(USER_ID))!;
+    expect(JSON.parse(serialized)).toEqual([
+      expect.objectContaining({ attachments: [expect.objectContaining({ id: A_ID, state: "ready" })] }),
+    ]);
+    expect(serialized).not.toContain("signed.example");
+    expect(serialized).not.toContain(B_ID);
+  });
 });
 
 describe("card creation and attachment ordering", () => {
@@ -541,17 +714,14 @@ describe("card creation and attachment ordering", () => {
     expect(fakeClient.rpcCalls).toHaveLength(1);
   });
 
-  test("mobile composer keeps one UUID across a failed retry and rotates it after success", async () => {
+  test("mobile composer keeps one user-scoped UUID across remount after a failed submit", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
-    vi.mocked(crypto.randomUUID)
-      .mockReturnValueOnce(REQUEST_ID)
-      .mockReturnValueOnce(A_ID)
-      .mockReturnValueOnce(B_ID);
+    vi.mocked(crypto.randomUUID).mockReturnValueOnce(REQUEST_ID).mockReturnValue(A_ID);
     fakeClient.cardInsertErrorOnce = error("temporary network failure");
     const container = document.createElement("div");
     document.body.append(container);
-    const root = createRoot(container);
+    let root = createRoot(container);
 
     await act(async () => {
       root.render(createElement(IdeaBoard, { userId: USER_ID, displayName: "测试", onSignOut: () => undefined }));
@@ -559,27 +729,116 @@ describe("card creation and attachment ordering", () => {
       await Promise.resolve();
     });
 
-    const input = container.querySelector<HTMLInputElement>(".mobile-composer input")!;
-    const form = container.querySelector<HTMLFormElement>(".mobile-composer")!;
+    let input = container.querySelector<HTMLInputElement>(".mobile-composer input")!;
+    let form = container.querySelector<HTMLFormElement>(".mobile-composer")!;
     await setComposerValue(input, "第一次构思");
     await submit(form);
+    await act(async () => root.unmount());
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(IdeaBoard, { userId: USER_ID, displayName: "测试", onSignOut: () => undefined }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    input = container.querySelector<HTMLInputElement>(".mobile-composer input")!;
+    form = container.querySelector<HTMLFormElement>(".mobile-composer")!;
+    expect(input.value).toBe("第一次构思");
     await submit(form);
+
+    expect(localStorage.getItem(draftKey(USER_ID, "composer"))).toBeNull();
     await setComposerValue(input, "第二次构思");
     await submit(form);
 
-    expect(fakeClient.cardInsertAttempts).toHaveLength(3);
-    expect(fakeClient.cardInsertAttempts[0]).toBe(REQUEST_ID);
-    expect(fakeClient.cardInsertAttempts[1]).toBe(REQUEST_ID);
+    expect(fakeClient.cardInsertAttempts.slice(0, 2)).toEqual([REQUEST_ID, REQUEST_ID]);
     expect(fakeClient.cardInsertAttempts[2]).not.toBe(REQUEST_ID);
     await act(async () => root.unmount());
   });
+
+  test("new-card editor keeps its user-scoped UUID across remount after a failed submit", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(crypto.randomUUID).mockReturnValueOnce(A_ID).mockReturnValueOnce(REQUEST_ID).mockReturnValue(B_ID);
+    fakeClient.cardInsertErrorOnce = error("temporary network failure");
+    const container = document.createElement("div");
+    document.body.append(container);
+    let root = createRoot(container);
+
+    await renderBoard(root);
+    await click(container.querySelector<HTMLButtonElement>("button.primary.desktop-only")!);
+    let title = container.querySelector<HTMLTextAreaElement>(".editor .title-field textarea")!;
+    await setTextAreaValue(title, "编辑器构思");
+    await click(container.querySelector<HTMLButtonElement>(".editor footer button.primary")!);
+    await act(async () => root.unmount());
+
+    root = createRoot(container);
+    await renderBoard(root);
+    await click(container.querySelector<HTMLButtonElement>("button.primary.desktop-only")!);
+    title = container.querySelector<HTMLTextAreaElement>(".editor .title-field textarea")!;
+    expect(title.value).toBe("编辑器构思");
+    await click(container.querySelector<HTMLButtonElement>(".editor footer button.primary")!);
+
+    expect(fakeClient.cardInsertAttempts).toHaveLength(2);
+    expect(fakeClient.cardInsertAttempts[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(fakeClient.cardInsertAttempts[1]).toBe(fakeClient.cardInsertAttempts[0]);
+    expect(localStorage.getItem(draftKey(USER_ID, "new"))).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  test("metadata delete failure reloads the ready projection without clearing the primary error", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const row = attachment(A_ID, "ready");
+    fakeClient.cards.push(card(7));
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    fakeClient.failAttachmentDeleteOnce = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await renderBoard(root);
+    await click(container.querySelector<HTMLButtonElement>(".task-card-main")!);
+    await click(container.querySelector<HTMLButtonElement>('button[aria-label="删除截图"]')!);
+
+    expect(container.querySelector(".attachment-grid")).toBeNull();
+    expect(container.querySelector(".notice")?.textContent).toContain("metadata delete failed");
+    expect(readBoardCache(USER_ID)[0].attachments).toHaveLength(0);
+    await act(async () => root.unmount());
+  });
 });
+
+async function renderBoard(root: ReturnType<typeof createRoot>): Promise<void> {
+  await act(async () => {
+    root.render(createElement(IdeaBoard, { userId: USER_ID, displayName: "测试", onSignOut: () => undefined }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 async function setComposerValue(input: HTMLInputElement, value: string): Promise<void> {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
   await act(async () => {
     setter?.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function setTextAreaValue(input: HTMLTextAreaElement, value: string): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function click(button: HTMLButtonElement): Promise<void> {
+  await act(async () => {
+    button.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 }
 
@@ -603,5 +862,31 @@ function asRecord(row: FakeAttachment): AttachmentRecord {
     sortOrder: row.sort_order,
     state: row.state,
     createdAt: row.created_at,
+  };
+}
+
+function recordCard(id: number, attachments: AttachmentRecord[] = []): import("@/lib/types").CardRecord {
+  return {
+    id,
+    title: `记录 ${id}`,
+    stage: "idea",
+    criteria: "",
+    result: "",
+    originalText: "",
+    organizedText: "",
+    aiAnalysis: null,
+    aiModel: null,
+    aiPromptVersion: null,
+    aiOrganizedAt: null,
+    originalTextUpdatedAt: null,
+    focus: false,
+    archived: false,
+    reference: false,
+    sortOrder: id,
+    completedAt: null,
+    previousStage: null,
+    createdAt: STALE,
+    updatedAt: STALE,
+    attachments,
   };
 }
