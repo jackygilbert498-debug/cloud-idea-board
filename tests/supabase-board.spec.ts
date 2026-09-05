@@ -56,8 +56,10 @@ vi.mock("@/lib/supabase-client", () => ({
 }));
 
 import {
+  clearAttachmentUrlCache,
   createBoardCard,
   deleteBoardAttachment,
+  getBoardAttachmentUrl,
   listBoardCards,
   reconcileBoardAttachments,
   reorderBoardAttachments,
@@ -83,6 +85,12 @@ const REQUEST_ID = "20000000-0000-4000-8000-000000000001";
 const NOW = new Date("2026-09-05T12:00:00.000Z");
 const STALE = "2026-09-05T11:30:00.000Z";
 const FRESH = "2026-09-05T11:50:00.000Z";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
 
 function error(message: string, fields: Omit<FakeError, "message"> = {}): FakeError {
   return { message, ...fields };
@@ -426,6 +434,8 @@ class FakeSupabase {
   zeroAttachmentDeleteOnce = false;
   rpcError: FakeError | null = null;
   beforeStorageRemoveOnce: (() => Promise<void>) | null = null;
+  signedUrlCalls = 0;
+  createSignedUrl: ((objectKey: string) => Promise<{ data: { signedUrl: string } | null; error: FakeError | null }>) | null = null;
 
   readonly auth = {
     getUser: async () => ({ data: { user: { id: this.userId } }, error: null }),
@@ -475,6 +485,11 @@ class FakeSupabase {
             ? { data: new Blob(["test"], { type: "image/png" }), error: null }
             : { data: null, error: error("Object not found", { statusCode: "404" }) };
         },
+        createSignedUrl: async (objectKey: string) => {
+          this.signedUrlCalls += 1;
+          if (this.createSignedUrl) return this.createSignedUrl(objectKey);
+          return { data: { signedUrl: `https://signed.example/${this.signedUrlCalls}` }, error: null };
+        },
       };
     },
   };
@@ -507,6 +522,24 @@ afterEach(() => {
 });
 
 describe("attachment state machine", () => {
+  test("clearing signed URLs prevents an older request from repopulating the cache", async () => {
+    const request = deferred<{ data: { signedUrl: string }; error: null }>();
+    fakeClient.createSignedUrl = () => request.promise;
+    const record = asRecord(attachment(A_ID, "ready"));
+    clearAttachmentUrlCache();
+    const first = getBoardAttachmentUrl(record);
+    await Promise.resolve();
+    expect(fakeClient.signedUrlCalls).toBe(1);
+
+    clearAttachmentUrlCache();
+    request.resolve({ data: { signedUrl: "https://signed.example/stale" }, error: null });
+    await expect(first).resolves.toBe("https://signed.example/stale");
+    fakeClient.createSignedUrl = null;
+
+    await expect(getBoardAttachmentUrl(record)).resolves.toBe("https://signed.example/2");
+    expect(fakeClient.signedUrlCalls).toBe(2);
+  });
+
   test("list exposes only ready attachment metadata", async () => {
     fakeClient.cards.push(card(7));
     fakeClient.attachments.push(

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
 import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
@@ -20,6 +20,7 @@ const appAuth = vi.hoisted(() => {
       unsubscribeCalls: 0,
       getSession: async () => ({ data: { session: null as Session | null }, error: null as Error | null }),
       signInCalls: [] as Array<{ email: string; password: string }>,
+      signIn: null as null | ((credentials: { email: string; password: string }) => Promise<{ data: { session: Session | null }; error: Error | null }>),
       signOutCalls: [] as Array<{ scope: "local" | "global" }>,
       signOut: null as null | ((request: { scope: "local" | "global" }) => Promise<{ error: Error | null }>),
     };
@@ -31,6 +32,7 @@ const appAuth = vi.hoisted(() => {
       },
       signInWithPassword: async (credentials: { email: string; password: string }) => {
         state.signInCalls.push(credentials);
+        if (state.signIn) return state.signIn(credentials);
         return { data: { session: sessionFor(name) }, error: null };
       },
       resetPasswordForEmail: async () => ({ error: null }),
@@ -52,16 +54,23 @@ const appAuth = vi.hoisted(() => {
     unsubscribedBeforeConfigure: [] as boolean[],
     clearUrlCalls: 0,
     boardMounts: 0,
+    configuration: null as null | ((mode: string) => Promise<unknown>),
+    activeClient: initial.client as unknown,
   };
 });
 
 vi.mock("@/lib/supabase-client", () => ({
-  supabase: appAuth.initial.client,
+  get supabase() { return appAuth.activeClient; },
   getSupabaseAuthMode: () => "persistent",
+  getSupabaseAuthError: () => null,
   configureSupabaseAuthMode: async (mode: string) => {
     appAuth.configuredModes.push(mode);
     appAuth.unsubscribedBeforeConfigure.push(appAuth.initial.state.unsubscribeCalls > 0);
-    return appAuth.replacement.client;
+    const next = appAuth.configuration
+      ? await appAuth.configuration(mode)
+      : appAuth.replacement.client;
+    appAuth.activeClient = next;
+    return next;
   },
 }));
 
@@ -96,21 +105,35 @@ afterEach(async () => {
   appAuth.initial.state.unsubscribeCalls = 0;
   appAuth.initial.state.getSession = async () => ({ data: { session: null }, error: null });
   appAuth.initial.state.signInCalls = [];
+  appAuth.initial.state.signIn = null;
   appAuth.initial.state.signOutCalls = [];
   appAuth.initial.state.signOut = null;
   appAuth.replacement.state.listener = null;
   appAuth.replacement.state.unsubscribeCalls = 0;
   appAuth.replacement.state.getSession = async () => ({ data: { session: null }, error: null });
   appAuth.replacement.state.signInCalls = [];
+  appAuth.replacement.state.signIn = null;
   appAuth.replacement.state.signOutCalls = [];
   appAuth.replacement.state.signOut = null;
   appAuth.configuredModes = [];
   appAuth.unsubscribedBeforeConfigure = [];
   appAuth.clearUrlCalls = 0;
   appAuth.boardMounts = 0;
+  appAuth.configuration = null;
+  appAuth.activeClient = appAuth.initial.client;
 });
 
-async function renderPanel(overrides: Partial<React.ComponentProps<typeof AccountPanel>> = {}) {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function renderPanel(overrides: Partial<React.ComponentProps<typeof AccountPanel>> = {}, strict = false) {
   const props: React.ComponentProps<typeof AccountPanel> = {
     email: "alice@example.com",
     authMode: "session",
@@ -119,7 +142,9 @@ async function renderPanel(overrides: Partial<React.ComponentProps<typeof Accoun
     ...overrides,
   };
   root = createRoot(container);
-  await act(async () => root.render(<AccountPanel {...props} />));
+  await act(async () => root.render(strict
+    ? <StrictMode><AccountPanel {...props} /></StrictMode>
+    : <AccountPanel {...props} />));
 }
 
 function changeInput(element: HTMLInputElement, value: string) {
@@ -213,6 +238,48 @@ test("a pending logout ignores duplicate clicks and reports a thrown failure", a
   expect(container.querySelector('[role="alert"]')?.textContent).toContain("远端退出失败");
 });
 
+test("StrictMode keeps password success mounted and restores the action button", async () => {
+  await renderPanel({}, true);
+  const password = container.querySelector<HTMLInputElement>('[aria-label="新密码"]')!;
+  const confirmation = container.querySelector<HTMLInputElement>('[aria-label="确认新密码"]')!;
+  const submit = container.querySelector<HTMLButtonElement>(".account-password-form button")!;
+  await act(async () => {
+    changeInput(password, "new-password");
+    changeInput(confirmation, "new-password");
+    submit.click();
+    await Promise.resolve();
+  });
+  expect(container.querySelector('[role="status"]')?.textContent).toContain("密码已更新");
+  expect(submit.disabled).toBe(false);
+});
+
+test("StrictMode shows password and logout failures and restores their buttons", async () => {
+  await renderPanel({
+    onUpdatePassword: async () => { throw new Error("密码远端失败"); },
+    onSignOut: async () => { throw new Error("退出远端失败"); },
+  }, true);
+  const password = container.querySelector<HTMLInputElement>('[aria-label="新密码"]')!;
+  const confirmation = container.querySelector<HTMLInputElement>('[aria-label="确认新密码"]')!;
+  const passwordButton = container.querySelector<HTMLButtonElement>(".account-password-form button")!;
+  await act(async () => {
+    changeInput(password, "new-password");
+    changeInput(confirmation, "new-password");
+    passwordButton.click();
+    await Promise.resolve();
+  });
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("密码远端失败");
+  expect(passwordButton.disabled).toBe(false);
+
+  const logout = Array.from(container.querySelectorAll<HTMLButtonElement>(".account-actions button"))
+    .find((button) => button.textContent?.includes("退出当前设备"))!;
+  await act(async () => {
+    logout.click();
+    await Promise.resolve();
+  });
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("退出远端失败");
+  expect(logout.disabled).toBe(false);
+});
+
 test("sign in defaults to remembered persistent login and unchecked mode uses the replacement client without storing password", async () => {
   localStorage.setItem("cloud-memo-board:v2:remembered-email", "remembered@example.com");
   await renderApp();
@@ -239,6 +306,93 @@ test("sign in defaults to remembered persistent login and unchecked mode uses th
   expect(localStorage.getItem("cloud-memo-board:v2:remembered-email")).toBeNull();
   expect(JSON.stringify(storageEntries(localStorage))).not.toContain("browser-owned-secret");
   expect(JSON.stringify(storageEntries(sessionStorage))).not.toContain("browser-owned-secret");
+});
+
+test("a deferred mode switch keeps the sign-in form mounted and shows invalid credentials", async () => {
+  const switching = deferred<unknown>();
+  appAuth.configuration = () => switching.promise;
+  appAuth.replacement.state.signIn = async () => ({ data: { session: null }, error: new Error("Invalid login credentials") });
+  await renderApp();
+  const email = container.querySelector<HTMLInputElement>('input[type="email"]')!;
+  const password = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+  const remember = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  await act(async () => {
+    changeInput(email, "alice@example.com");
+    changeInput(password, "wrong-password");
+    remember.click();
+    container.querySelector<HTMLFormElement>(".auth-card form")!.requestSubmit();
+    await Promise.resolve();
+  });
+  expect(container.querySelector(".auth-card")).not.toBeNull();
+  expect(container.textContent).not.toContain("正在确认登录状态");
+
+  await act(async () => {
+    switching.resolve(appAuth.replacement.client);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(container.querySelector(".auth-card")?.textContent).toContain("邮箱或密码不正确");
+  expect(container.querySelector<HTMLButtonElement>(".auth-card .primary")?.disabled).toBe(false);
+});
+
+test("a rejected mode switch returns to the sign-in form with a retryable error", async () => {
+  const switching = deferred<unknown>();
+  appAuth.configuration = () => switching.promise;
+  await renderApp();
+  const email = container.querySelector<HTMLInputElement>('input[type="email"]')!;
+  const password = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+  const remember = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  await act(async () => {
+    changeInput(email, "alice@example.com");
+    changeInput(password, "password-123");
+    remember.click();
+    container.querySelector<HTMLFormElement>(".auth-card form")!.requestSubmit();
+    await Promise.resolve();
+  });
+  await act(async () => {
+    switching.reject(new Error("会话存储不可用，请重试"));
+    await Promise.resolve();
+  });
+  expect(container.querySelector(".auth-card")?.textContent).toContain("会话存储不可用，请重试");
+  expect(container.querySelector<HTMLButtonElement>(".auth-card .primary")?.disabled).toBe(false);
+  expect(container.textContent).not.toContain("正在确认登录状态");
+});
+
+test("a post-dispose replacement failure retries the requested mode and signs in with the fresh client", async () => {
+  let attempts = 0;
+  appAuth.configuration = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      appAuth.activeClient = null;
+      throw new Error("client factory failed");
+    }
+    return appAuth.replacement.client;
+  };
+  await renderApp();
+  const fillAndSubmit = async () => {
+    const email = container.querySelector<HTMLInputElement>('input[type="email"]')!;
+    const password = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+    changeInput(email, "bob@example.com");
+    changeInput(password, "password-123");
+    const remember = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    if (remember.checked) remember.click();
+    container.querySelector<HTMLFormElement>(".auth-card form")!.requestSubmit();
+    await Promise.resolve();
+  };
+  await act(fillAndSubmit);
+  expect(container.textContent).toContain("client factory failed");
+
+  const retry = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => button.textContent?.includes("重试初始化"))!;
+  await act(async () => {
+    retry.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(appAuth.configuredModes).toEqual(["session", "session"]);
+  await act(fillAndSubmit);
+  await vi.waitFor(() => expect(container.querySelector('[data-testid="board"]')?.getAttribute("data-user")).toBe("bob"));
+  expect(appAuth.replacement.state.signInCalls).toHaveLength(1);
 });
 
 test("a late getSession result cannot overwrite a newer auth event", async () => {

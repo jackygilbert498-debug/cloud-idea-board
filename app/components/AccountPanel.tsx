@@ -22,7 +22,11 @@ export function AccountPanel({ email, authMode, onUpdatePassword, onSignOut }: A
   const actionInFlight = useRef(false);
   const mounted = useRef(true);
 
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    // StrictMode intentionally runs setup -> cleanup -> setup in development.
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const updatePassword = async (event: React.FormEvent) => {
     event.preventDefault();

@@ -4,14 +4,17 @@ import type { AttachmentRecord, CardDraft, CardRecord, IdeaAnalysis, IdeaAnalysi
 const STORAGE_PREFIX = "cloud-memo-board:v2";
 const REMEMBERED_EMAIL_KEY = `${STORAGE_PREFIX}:remembered-email`;
 
-function storageAvailable(): boolean {
-  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+function appStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try { return window.localStorage; }
+  catch { return null; }
 }
 
 function readJson(key: string): unknown {
-  if (!storageAvailable()) return null;
+  const storage = appStorage();
+  if (!storage) return null;
   try {
-    const value = window.localStorage.getItem(key);
+    const value = storage.getItem(key);
     return value ? JSON.parse(value) : null;
   } catch {
     return null;
@@ -19,9 +22,10 @@ function readJson(key: string): unknown {
 }
 
 function writeJson(key: string, value: unknown): void {
-  if (!storageAvailable()) return;
+  const storage = appStorage();
+  if (!storage) return;
   try {
-    window.localStorage.setItem(key, JSON.stringify(value));
+    storage.setItem(key, JSON.stringify(value));
   } catch {
     // A full or disabled storage area must never prevent cloud saves.
   }
@@ -36,26 +40,34 @@ export function draftKey(userId: string, cardId: number | "new" | "composer"): s
 }
 
 export function readRememberedEmail(): string {
-  if (!storageAvailable()) return "";
-  return window.localStorage.getItem(REMEMBERED_EMAIL_KEY)?.trim() ?? "";
+  const storage = appStorage();
+  if (!storage) return "";
+  try { return storage.getItem(REMEMBERED_EMAIL_KEY)?.trim() ?? ""; }
+  catch { return ""; }
 }
 
 export function setRememberedLogin(email: string, remember: boolean): void {
-  if (!storageAvailable()) return;
+  const storage = appStorage();
+  if (!storage) return;
   const cleanEmail = email.trim();
-  if (!remember || !cleanEmail) window.localStorage.removeItem(REMEMBERED_EMAIL_KEY);
-  else window.localStorage.setItem(REMEMBERED_EMAIL_KEY, cleanEmail);
+  try {
+    if (!remember || !cleanEmail) storage.removeItem(REMEMBERED_EMAIL_KEY);
+    else storage.setItem(REMEMBERED_EMAIL_KEY, cleanEmail);
+  } catch { /* Remembering an email must never block authentication. */ }
 }
 
 /** Removes only one exact user's application projection; auth and preferences are separate namespaces. */
 export function clearUserLocalState(userId: string): void {
-  if (!storageAvailable()) return;
+  const storage = appStorage();
+  if (!storage) return;
   const boardKey = boardCacheKey(userId);
   const userDraftPrefix = `${STORAGE_PREFIX}:draft:${userId}:`;
-  for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
-    const key = window.localStorage.key(index);
-    if (key === boardKey || key?.startsWith(userDraftPrefix)) window.localStorage.removeItem(key);
-  }
+  try {
+    for (let index = storage.length - 1; index >= 0; index -= 1) {
+      const key = storage.key(index);
+      if (key === boardKey || key?.startsWith(userDraftPrefix)) storage.removeItem(key);
+    }
+  } catch { /* Storage policy changes must not turn logout into a crash. */ }
 }
 
 export function readBoardCache(userId: string): CardRecord[] {
@@ -209,12 +221,17 @@ export function writeCardDraft(userId: string, cardId: number | "new" | "compose
 }
 
 export function clearCardDraft(userId: string, cardId: number | "new" | "composer"): void {
-  if (!storageAvailable()) return;
-  window.localStorage.removeItem(draftKey(userId, cardId));
+  const storage = appStorage();
+  if (!storage) return;
+  try { storage.removeItem(draftKey(userId, cardId)); }
+  catch { /* Cloud state stays authoritative when local storage is unavailable. */ }
 }
 
 export function hasCardDraft(userId: string, cardId: number | "new" | "composer"): boolean {
-  return storageAvailable() && window.localStorage.getItem(draftKey(userId, cardId)) !== null;
+  const storage = appStorage();
+  if (!storage) return false;
+  try { return storage.getItem(draftKey(userId, cardId)) !== null; }
+  catch { return false; }
 }
 
 function parseCardDraft(value: unknown): CardDraft | null {

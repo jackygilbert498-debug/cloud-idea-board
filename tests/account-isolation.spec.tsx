@@ -46,6 +46,7 @@ vi.mock("@/lib/supabase-client", () => {
   return {
     supabase: client,
     getSupabaseAuthMode: () => "persistent",
+    getSupabaseAuthError: () => null,
     configureSupabaseAuthMode: async () => client,
     requireSupabase: () => { throw new Error("Unexpected network access in offline test"); },
   };

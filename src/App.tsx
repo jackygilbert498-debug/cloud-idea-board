@@ -5,7 +5,7 @@ import type { SignOutRequest } from "@/app/components/AccountPanel";
 import { IdeaBoard } from "@/app/components/IdeaBoard";
 import { clearAttachmentUrlCache } from "@/lib/supabase-board";
 import { clearUserLocalState, readRememberedEmail, setRememberedLogin, withTimeout } from "@/lib/local-state";
-import { configureSupabaseAuthMode, getSupabaseAuthMode, supabase } from "@/lib/supabase-client";
+import { configureSupabaseAuthMode, getSupabaseAuthError, getSupabaseAuthMode, supabase } from "@/lib/supabase-client";
 import type { AuthStorageMode } from "@/lib/supabase-client";
 
 export default function App() {
@@ -14,7 +14,9 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const sessionRef = useRef<Session | null>(null);
   const [loading, setLoading] = useState(Boolean(client));
-  const [authError, setAuthError] = useState("");
+  const [authError, setAuthError] = useState(() => getSupabaseAuthError()?.message ?? "");
+  const [configurationRetrying, setConfigurationRetrying] = useState(false);
+  const [clientRevision, setClientRevision] = useState(0);
   const [recovery, setRecovery] = useState(false);
   const activeClientRef = useRef<SupabaseClient | null>(client);
   const authGenerationRef = useRef(0);
@@ -22,6 +24,7 @@ export default function App() {
   const identityGenerationRef = useRef(0);
   const [identityGeneration, setIdentityGeneration] = useState(0);
   const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
+  const skipNextRestorationRef = useRef(false);
 
   const commitSession = useCallback((nextSession: Session | null) => {
     if (sessionRef.current?.user.id !== nextSession?.user.id) {
@@ -76,13 +79,16 @@ export default function App() {
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
     });
     subscriptionRef.current = listener.subscription;
-    // Subscribe before restoration so a newer auth event invalidates its snapshot.
-    void loadSession();
+    // Explicit login-mode replacement keeps the current form mounted. The SDK
+    // still delivers INITIAL_SESSION; only the initial app client needs this
+    // additional bounded restoration read.
+    if (skipNextRestorationRef.current) skipNextRestorationRef.current = false;
+    else void loadSession();
     return () => {
       listener.subscription.unsubscribe();
       if (subscriptionRef.current === listener.subscription) subscriptionRef.current = null;
     };
-  }, [client, commitSession, loadSession]);
+  }, [client, clientRevision, commitSession, loadSession]);
 
   const selectAuthMode = useCallback(async (mode: AuthStorageMode) => {
     if (mode === authMode && activeClientRef.current) return activeClientRef.current;
@@ -94,15 +100,52 @@ export default function App() {
     commitSession(null);
     setRecovery(false);
     setAuthError("");
-    setLoading(true);
-    const nextClient = await configureSupabaseAuthMode(mode);
-    if (authGenerationRef.current !== generation) return nextClient;
-    activeClientRef.current = nextClient;
-    setAuthMode(mode);
-    setClient(nextClient);
-    setLoading(Boolean(nextClient));
-    return nextClient;
+    try {
+      const nextClient = await configureSupabaseAuthMode(mode);
+      if (authGenerationRef.current !== generation) return nextClient;
+      activeClientRef.current = nextClient;
+      setAuthMode(mode);
+      skipNextRestorationRef.current = true;
+      setClient(nextClient);
+      setLoading(false);
+      return nextClient;
+    } catch (reason) {
+      if (authGenerationRef.current === generation) {
+        activeClientRef.current = supabase;
+        setLoading(false);
+        if (supabase) {
+          setClient(supabase);
+          skipNextRestorationRef.current = true;
+          setClientRevision((value) => value + 1);
+        } else {
+          // Preserve the user's requested mode so the explicit retry builds the
+          // same kind of client rather than silently reverting persistence.
+          setAuthMode(mode);
+          setAuthError(reason instanceof Error ? reason.message : "认证客户端切换失败");
+          setClient(null);
+        }
+      }
+      throw reason;
+    }
   }, [authMode, commitSession]);
+
+  const retryConfiguration = useCallback(async () => {
+    if (configurationRetrying) return;
+    setConfigurationRetrying(true);
+    setAuthError("");
+    try {
+      const nextClient = await configureSupabaseAuthMode(authMode);
+      if (!nextClient) throw new Error("尚未配置 Supabase，请检查部署环境变量");
+      authGenerationRef.current += 1;
+      activeClientRef.current = nextClient;
+      setClient(nextClient);
+      setLoading(true);
+    } catch (reason) {
+      setAuthError(reason instanceof Error ? reason.message : "认证客户端初始化失败");
+    } finally {
+      setConfigurationRetrying(false);
+    }
+  }, [authMode, configurationRetrying]);
 
   const acceptSignedInSession = useCallback((source: SupabaseClient, nextSession: Session) => {
     if (activeClientRef.current !== source) return;
@@ -152,7 +195,7 @@ export default function App() {
     }
   }, [commitSession]);
 
-  if (!client) return <ConfigurationNeeded />;
+  if (!client) return <ConfigurationNeeded message={authError} retrying={configurationRetrying} onRetry={retryConfiguration} />;
   if (loading) return <AuthLoading />;
   if (authError && !session) return <AuthFailure message={authError} onRetry={() => void loadSession()} />;
   if (recovery && session) return <UpdatePassword client={client} onDone={() => setRecovery(false)} />;
@@ -256,6 +299,6 @@ function AuthFailure({ message, onRetry }: { message: string; onRetry: () => voi
   return <main className="auth-shell"><section className="auth-card"><div className="auth-mark"><RefreshCw size={20} /></div><h1>暂时无法连接</h1><p>{message}</p><button className="primary auth-retry" onClick={onRetry}><RefreshCw size={16} />重新连接</button></section></main>;
 }
 
-function ConfigurationNeeded() {
-  return <main className="auth-shell"><section className="auth-card"><div className="auth-mark"><Sparkles size={20} /></div><h1>等待 Supabase 配置</h1><p>请在 Netlify 环境变量中填写 Supabase 项目地址和匿名密钥，然后重新部署。</p></section></main>;
+function ConfigurationNeeded({ message, retrying, onRetry }: { message: string; retrying: boolean; onRetry: () => void }) {
+  return <main className="auth-shell"><section className="auth-card"><div className="auth-mark"><Sparkles size={20} /></div><h1>{message ? "认证存储暂不可用" : "等待 Supabase 配置"}</h1><p>{message || "请在 Netlify 环境变量中填写 Supabase 项目地址和匿名密钥，然后重新部署。"}</p>{message && <button className="primary auth-retry" disabled={retrying} onClick={onRetry}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}重试初始化</button>}</section></main>;
 }

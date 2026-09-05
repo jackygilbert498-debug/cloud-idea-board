@@ -13,6 +13,7 @@ const SCREENSHOT_BUCKET = "screenshots";
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+let signedUrlCacheGeneration = 0;
 const ATTACHMENT_RECONCILE_AGE_MS = 15 * 60 * 1000;
 
 type AttachmentState = AttachmentRecord["state"];
@@ -316,20 +317,24 @@ export async function getBoardAttachmentUrl(attachment: AttachmentRecord, downlo
   const cacheKey = `${download ? "download" : "view"}:${attachment.objectKey}`;
   const cached = signedUrlCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.url;
+  const cacheGeneration = signedUrlCacheGeneration;
 
   const bucket = requireSupabase().storage.from(SCREENSHOT_BUCKET);
   const { data, error } = download
     ? await bucket.createSignedUrl(attachment.objectKey, 5 * 60, { download: attachment.filename })
     : await bucket.createSignedUrl(attachment.objectKey, 60 * 60);
   if (error || !data?.signedUrl) fail(error, "无法读取截图");
-  signedUrlCache.set(cacheKey, {
-    url: data.signedUrl,
-    expiresAt: Date.now() + (download ? 4 : 50) * 60 * 1000,
-  });
+  if (signedUrlCacheGeneration === cacheGeneration) {
+    signedUrlCache.set(cacheKey, {
+      url: data.signedUrl,
+      expiresAt: Date.now() + (download ? 4 : 50) * 60 * 1000,
+    });
+  }
   return data.signedUrl;
 }
 
 export function clearAttachmentUrlCache(objectKey?: string): void {
+  signedUrlCacheGeneration += 1;
   for (const key of signedUrlCache.keys()) {
     if (!objectKey || key.endsWith(`:${objectKey}`)) signedUrlCache.delete(key);
   }
