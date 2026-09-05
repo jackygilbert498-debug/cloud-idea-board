@@ -144,7 +144,9 @@ function parseCachedCard(value: unknown): CardRecord | null {
     || typeof value.focus !== "boolean" || typeof value.archived !== "boolean" || typeof value.reference !== "boolean"
     || !isFiniteNumber(value.sortOrder) || !isNullableString(value.completedAt)
     || !isPreviousStage(value.previousStage)
-    || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string" || !Array.isArray(value.attachments)) return null;
+    || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string" || !Array.isArray(value.attachments)
+    || (value.mutationVersion !== undefined && !isFiniteNumber(value.mutationVersion))
+    || (value.pendingConfirmation !== undefined && typeof value.pendingConfirmation !== "boolean")) return null;
   const analysis = value.aiAnalysis === null ? null : parseIdeaAnalysis(value.aiAnalysis);
   if (value.aiAnalysis !== null && analysis === null) return null;
   return {
@@ -169,6 +171,8 @@ function parseCachedCard(value: unknown): CardRecord | null {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     attachments: value.attachments.map(parseCachedAttachment).filter((item): item is AttachmentRecord => item !== null),
+    mutationVersion: value.mutationVersion,
+    pendingConfirmation: value.pendingConfirmation,
   };
 }
 

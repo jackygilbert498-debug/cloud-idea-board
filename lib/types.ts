@@ -2,7 +2,7 @@ export const STAGES = ["idea", "todo", "doing", "done"] as const;
 
 export type Stage = (typeof STAGES)[number];
 export type ActiveStage = Exclude<Stage, "done">;
-export type SyncState = "synced" | "syncing" | "offline" | "error" | "draft";
+export type SyncState = "synced" | "syncing" | "checking" | "offline" | "error" | "draft";
 export type AttachmentState = "pending" | "ready" | "deleting";
 
 export type IdeaCertainty = "explicit" | "inferred" | "uncertain";
@@ -70,6 +70,13 @@ export type CardRecord = {
   createdAt: string;
   updatedAt: string;
   attachments: AttachmentRecord[];
+  mutationVersion?: number;
+  pendingConfirmation?: boolean;
+};
+
+export type CardSaveResult = {
+  card: CardRecord;
+  state: "confirmed" | "pending";
 };
 
 export type CardDraft = {
