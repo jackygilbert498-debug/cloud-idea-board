@@ -1039,6 +1039,33 @@ describe("card creation and attachment ordering", () => {
     expect(readBoardCache(USER_ID)[0].attachments).toHaveLength(0);
     await act(async () => root.unmount());
   });
+
+  test.each([
+    { label: "normal metadata success", afterCommit: false },
+    { label: "metadata after-commit response loss", afterCommit: true },
+  ])("successful delete hides cached attachment before a failed list: $label", async ({ afterCommit }) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const row = attachment(A_ID, "ready");
+    fakeClient.cards.push(card(7));
+    fakeClient.attachments.push(row);
+    fakeClient.objects.add(row.object_key);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await renderBoard(root);
+    expect(readBoardCache(USER_ID)[0].attachments).toHaveLength(1);
+    fakeClient.afterCommitAttachmentDeleteErrorOnce = afterCommit;
+    fakeClient.cardSelectError = error("list unavailable after delete");
+    await click(container.querySelector<HTMLButtonElement>(".task-card-main")!);
+    await click(container.querySelector<HTMLButtonElement>('button[aria-label="删除截图"]')!);
+
+    expect(container.querySelector(".attachment-grid")).toBeNull();
+    expect(readBoardCache(USER_ID)[0].attachments).toHaveLength(0);
+    await act(async () => root.unmount());
+  });
 });
 
 async function renderBoard(root: ReturnType<typeof createRoot>): Promise<void> {

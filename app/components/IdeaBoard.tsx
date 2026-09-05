@@ -314,24 +314,33 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     }
   }, [composer, composerRequestId, create, userId]);
 
+  const hideAttachmentProjection = useCallback((attachmentId: string) => {
+    const hide = (card: CardRecord): CardRecord => ({
+      ...card,
+      attachments: card.attachments.filter((item) => item.id !== attachmentId),
+    });
+    commitCards(cardsRef.current.map(hide));
+    setSelected((current) => current && current !== "new" ? hide(current) : current);
+    setViewer((current) => {
+      if (!current?.attachments.some((item) => item.id === attachmentId)) return current;
+      const attachments = current.attachments.filter((item) => item.id !== attachmentId);
+      return attachments.length ? { attachments, index: Math.min(current.index, attachments.length - 1) } : null;
+    });
+  }, [commitCards]);
+
   const removeAttachment = useCallback(async (attachment: AttachmentRecord) => {
     setSaving(true);
     setSyncState(navigator.onLine ? "syncing" : "offline");
-    try { if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再删除截图"); await deleteBoardAttachment(attachment); await load(); }
+    try {
+      if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再删除截图");
+      await deleteBoardAttachment(attachment);
+      hideAttachmentProjection(attachment.id);
+      await load();
+    }
     catch (reason) {
       const message = reason instanceof Error ? reason.message : "截图删除失败";
       if (reason instanceof AttachmentDeleteError && reason.projection === "hidden") {
-        const hide = (card: CardRecord): CardRecord => ({
-          ...card,
-          attachments: card.attachments.filter((item) => item.id !== attachment.id),
-        });
-        commitCards(cardsRef.current.map(hide));
-        setSelected((current) => current && current !== "new" ? hide(current) : current);
-        setViewer((current) => {
-          if (!current?.attachments.some((item) => item.id === attachment.id)) return current;
-          const attachments = current.attachments.filter((item) => item.id !== attachment.id);
-          return attachments.length ? { attachments, index: Math.min(current.index, attachments.length - 1) } : null;
-        });
+        hideAttachmentProjection(attachment.id);
       }
       if (navigator.onLine) await load();
       // load() clears its own notice on success, so restore the mutation error last.
@@ -339,7 +348,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       setSyncState(navigator.onLine ? "error" : "offline");
     }
     finally { setSaving(false); }
-  }, [commitCards, load]);
+  }, [hideAttachmentProjection, load]);
 
   const reorderAttachments = useCallback(async (cardId: number, ids: string[]) => {
     setSaving(true);
