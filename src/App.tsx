@@ -16,6 +16,9 @@ export default function App() {
   const [loading, setLoading] = useState(Boolean(client));
   const [authError, setAuthError] = useState(() => getSupabaseAuthError()?.message ?? "");
   const [configurationRetrying, setConfigurationRetrying] = useState(false);
+  const [pendingCleanupUserId, setPendingCleanupUserId] = useState<string | null>(null);
+  const [cleanupError, setCleanupError] = useState("");
+  const [cleanupRetrying, setCleanupRetrying] = useState(false);
   const [clientRevision, setClientRevision] = useState(0);
   const [recovery, setRecovery] = useState(false);
   const activeClientRef = useRef<SupabaseClient | null>(client);
@@ -182,8 +185,15 @@ export default function App() {
         commitSession(null);
       }
       if (request.clearLocalData) {
-        clearUserLocalState(userId);
-        clearAttachmentUrlCache();
+        try {
+          clearUserLocalState(userId);
+          clearAttachmentUrlCache();
+          setPendingCleanupUserId(null);
+          setCleanupError("");
+        } catch (reason) {
+          setPendingCleanupUserId(userId);
+          setCleanupError(reason instanceof Error ? reason.message : "本机数据清除失败，请重试");
+        }
       }
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "退出失败";
@@ -195,7 +205,25 @@ export default function App() {
     }
   }, [commitSession]);
 
+  const retryLocalCleanup = useCallback(async () => {
+    const userId = pendingCleanupUserId;
+    if (!userId || cleanupRetrying) return;
+    setCleanupRetrying(true);
+    try {
+      clearUserLocalState(userId);
+      clearAttachmentUrlCache();
+      setPendingCleanupUserId(null);
+      setCleanupError("");
+      setAuthError("");
+    } catch (reason) {
+      setCleanupError(reason instanceof Error ? reason.message : "本机数据清除失败，请重试");
+    } finally {
+      setCleanupRetrying(false);
+    }
+  }, [cleanupRetrying, pendingCleanupUserId]);
+
   if (!client) return <ConfigurationNeeded message={authError} retrying={configurationRetrying} onRetry={retryConfiguration} />;
+  if (pendingCleanupUserId) return <LocalCleanupPending message={cleanupError} retrying={cleanupRetrying} onRetry={retryLocalCleanup} />;
   if (loading) return <AuthLoading />;
   if (authError && !session) return <AuthFailure message={authError} onRetry={() => void loadSession()} />;
   if (recovery && session) return <UpdatePassword client={client} onDone={() => setRecovery(false)} />;
@@ -301,4 +329,8 @@ function AuthFailure({ message, onRetry }: { message: string; onRetry: () => voi
 
 function ConfigurationNeeded({ message, retrying, onRetry }: { message: string; retrying: boolean; onRetry: () => void }) {
   return <main className="auth-shell"><section className="auth-card"><div className="auth-mark"><Sparkles size={20} /></div><h1>{message ? "认证存储暂不可用" : "等待 Supabase 配置"}</h1><p>{message || "请在 Netlify 环境变量中填写 Supabase 项目地址和匿名密钥，然后重新部署。"}</p>{message && <button className="primary auth-retry" disabled={retrying} onClick={onRetry}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}重试初始化</button>}</section></main>;
+}
+
+function LocalCleanupPending({ message, retrying, onRetry }: { message: string; retrying: boolean; onRetry: () => void }) {
+  return <main className="auth-shell"><section className="auth-card"><div className="auth-mark"><RefreshCw size={20} /></div><h1>已退出，但本机数据尚未清除</h1><p>{message || "请恢复浏览器存储权限后重试。"}</p><button className="primary auth-retry" disabled={retrying} onClick={onRetry}>{retrying ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}重试清除本机数据</button></section></main>;
 }

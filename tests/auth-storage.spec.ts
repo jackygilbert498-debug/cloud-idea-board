@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { boardCacheKey, clearUserLocalState, draftKey, readRememberedEmail, setRememberedLogin } from "@/lib/local-state";
+import { boardCacheKey, clearUserLocalState, draftKey, LocalStateClearError, readRememberedEmail, setRememberedLogin } from "@/lib/local-state";
 
 const sdk = vi.hoisted(() => ({
   clients: [] as Array<{ auth: { dispose: () => Promise<void> } }>,
@@ -134,8 +134,39 @@ test("remembered email helpers tolerate disabled local storage operations", () =
   });
   expect(readRememberedEmail()).toBe("");
   expect(() => setRememberedLogin("alice@example.com", true)).not.toThrow();
-  expect(() => clearUserLocalState("alice")).not.toThrow();
 });
+
+test.each(["length", "key", "removeItem"] as const)(
+  "clearUserLocalState reports a %s failure instead of claiming cleanup succeeded",
+  (operation) => {
+    localStorage.setItem(boardCacheKey("alice"), "alice-board");
+    localStorage.setItem(draftKey("alice", 1), "alice-draft");
+    localStorage.setItem(boardCacheKey("bob"), "bob-board");
+    localStorage.setItem("sb-project-ref-auth-token", "auth-token");
+    localStorage.setItem("unrelated", "keep");
+    const failure = operation === "length"
+      ? vi.spyOn(Storage.prototype, "length", "get").mockImplementation(() => {
+          throw new DOMException("length disabled", "SecurityError");
+        })
+      : vi.spyOn(Storage.prototype, operation).mockImplementation(() => {
+          throw new DOMException(`${operation} disabled`, "SecurityError");
+        });
+
+    let caught: unknown;
+    try { clearUserLocalState("alice"); }
+    catch (reason) { caught = reason; }
+    expect(caught).toBeInstanceOf(LocalStateClearError);
+    expect(caught).toMatchObject({
+      name: "LocalStateClearError",
+      message: expect.stringContaining("本机数据清除失败"),
+    });
+    failure.mockRestore();
+
+    expect(localStorage.getItem(boardCacheKey("bob"))).toBe("bob-board");
+    expect(localStorage.getItem("sb-project-ref-auth-token")).toBe("auth-token");
+    expect(localStorage.getItem("unrelated")).toBe("keep");
+  },
+);
 
 test("auth reconfiguration awaits disposal before constructing the replacement and does not migrate tokens", async () => {
   const disposal = deferred();

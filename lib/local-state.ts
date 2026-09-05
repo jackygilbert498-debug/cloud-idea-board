@@ -4,6 +4,14 @@ import type { AttachmentRecord, CardDraft, CardRecord, IdeaAnalysis, IdeaAnalysi
 const STORAGE_PREFIX = "cloud-memo-board:v2";
 const REMEMBERED_EMAIL_KEY = `${STORAGE_PREFIX}:remembered-email`;
 
+export class LocalStateClearError extends Error {
+  override readonly name = "LocalStateClearError";
+
+  constructor(options?: ErrorOptions) {
+    super("本机数据清除失败，请恢复浏览器存储权限后重试", options);
+  }
+}
+
 function appStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try { return window.localStorage; }
@@ -56,18 +64,29 @@ export function setRememberedLogin(email: string, remember: boolean): void {
   } catch { /* Remembering an email must never block authentication. */ }
 }
 
-/** Removes only one exact user's application projection; auth and preferences are separate namespaces. */
-export function clearUserLocalState(userId: string): void {
-  const storage = appStorage();
-  if (!storage) return;
+/** Removes only one exact user's projection. A partial failure is explicit and safe to retry. */
+export function clearUserLocalState(userId: string): { removedKeys: number } {
+  let storage: Storage | null;
+  try { storage = typeof window === "undefined" ? null : window.localStorage; }
+  catch (reason) { throw new LocalStateClearError({ cause: reason }); }
+  if (!storage) throw new LocalStateClearError();
   const boardKey = boardCacheKey(userId);
   const userDraftPrefix = `${STORAGE_PREFIX}:draft:${userId}:`;
+  const targets: string[] = [];
   try {
-    for (let index = storage.length - 1; index >= 0; index -= 1) {
+    // Finish exact target discovery before deletion so enumeration failures do
+    // not leave an avoidable partial result. A later deletion failure may still
+    // be retried because missing keys are already a successful state.
+    const length = storage.length;
+    for (let index = 0; index < length; index += 1) {
       const key = storage.key(index);
-      if (key === boardKey || key?.startsWith(userDraftPrefix)) storage.removeItem(key);
+      if (key === boardKey || key?.startsWith(userDraftPrefix)) targets.push(key);
     }
-  } catch { /* Storage policy changes must not turn logout into a crash. */ }
+    for (const key of targets) storage.removeItem(key);
+    return { removedKeys: targets.length };
+  } catch (reason) {
+    throw new LocalStateClearError({ cause: reason });
+  }
 }
 
 export function readBoardCache(userId: string): CardRecord[] {

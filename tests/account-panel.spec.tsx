@@ -56,12 +56,13 @@ const appAuth = vi.hoisted(() => {
     boardMounts: 0,
     configuration: null as null | ((mode: string) => Promise<unknown>),
     activeClient: initial.client as unknown,
+    mode: "persistent" as "persistent" | "session",
   };
 });
 
 vi.mock("@/lib/supabase-client", () => ({
   get supabase() { return appAuth.activeClient; },
-  getSupabaseAuthMode: () => "persistent",
+  getSupabaseAuthMode: () => appAuth.mode,
   getSupabaseAuthError: () => null,
   configureSupabaseAuthMode: async (mode: string) => {
     appAuth.configuredModes.push(mode);
@@ -121,6 +122,8 @@ afterEach(async () => {
   appAuth.boardMounts = 0;
   appAuth.configuration = null;
   appAuth.activeClient = appAuth.initial.client;
+  appAuth.mode = "persistent";
+  vi.restoreAllMocks();
 });
 
 function deferred<T>() {
@@ -481,6 +484,64 @@ test("successful local cleanup removes only the signed-out user and clears signe
   expect(localStorage.getItem(boardCacheKey("bob"))).toBe("bob-board");
   expect(appAuth.clearUrlCalls).toBe(1);
 });
+
+test.each(["length", "key", "removeItem"] as const)(
+  "session logout keeps a retryable top-level cleanup warning when localStorage %s fails",
+  async (operation) => {
+    appAuth.mode = "session";
+    appAuth.initial.state.getSession = async () => ({ data: { session: testSession("alice") }, error: null });
+    appAuth.initial.state.signOut = async () => {
+      appAuth.initial.state.listener!("SIGNED_OUT", null);
+      return { error: null };
+    };
+    localStorage.setItem(boardCacheKey("alice"), "alice-board");
+    localStorage.setItem(draftKey("alice", 1), "alice-draft");
+    localStorage.setItem(boardCacheKey("bob"), "bob-board");
+    localStorage.setItem("sb-project-ref-auth-token", "auth-token");
+    localStorage.setItem("unrelated", "keep");
+    const failure = operation === "length"
+      ? vi.spyOn(Storage.prototype, "length", "get").mockImplementation(() => {
+          throw new DOMException("length disabled", "SecurityError");
+        })
+      : vi.spyOn(Storage.prototype, operation).mockImplementation(() => {
+          throw new DOMException(`${operation} disabled`, "SecurityError");
+        });
+    await renderApp();
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("已退出，但本机数据尚未清除");
+    const retry = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("重试清除本机数据"));
+    expect(retry).toBeDefined();
+    expect(appAuth.initial.state.signOutCalls).toEqual([{ scope: "local" }]);
+    expect(appAuth.clearUrlCalls).toBe(0);
+    expect([
+      localStorage.getItem(boardCacheKey("alice")),
+      localStorage.getItem(draftKey("alice", 1)),
+    ].some((value) => value !== null)).toBe(true);
+    failure.mockRestore();
+
+    await act(async () => {
+      retry!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("本机数据尚未清除");
+    expect(container.querySelector(".auth-card")).not.toBeNull();
+    expect(localStorage.getItem(boardCacheKey("alice"))).toBeNull();
+    expect(localStorage.getItem(draftKey("alice", 1))).toBeNull();
+    expect(localStorage.getItem(boardCacheKey("bob"))).toBe("bob-board");
+    expect(localStorage.getItem("sb-project-ref-auth-token")).toBe("auth-token");
+    expect(localStorage.getItem("unrelated")).toBe("keep");
+    expect(appAuth.initial.state.signOutCalls).toEqual([{ scope: "local" }]);
+    expect(appAuth.clearUrlCalls).toBe(1);
+  },
+);
 
 test("SIGNED_OUT resets recovery so a later sign-in does not reopen password recovery", async () => {
   appAuth.initial.state.getSession = async () => ({ data: { session: testSession("alice") }, error: null });
