@@ -12,27 +12,26 @@ const FOCUSABLE_SELECTOR = [
   "[contenteditable='true']",
 ].join(",");
 
-function isFocusable(element: HTMLElement) {
-  return (
-    element.tabIndex >= 0 &&
-    element.getAttribute("aria-hidden") !== "true" &&
-    !element.closest("[inert]")
-  );
-}
-
-function getFocusableElements(container: HTMLElement) {
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    isFocusable,
-  );
-}
-
-function isVisibleForRestore(element: HTMLElement) {
+function isVisible(element: HTMLElement) {
   for (let current: HTMLElement | null = element; current; current = current.parentElement) {
     if (current.hidden || current.hasAttribute("inert") || current.getAttribute("aria-hidden") === "true") return false;
     const style = window.getComputedStyle(current);
     if (style.display === "none" || style.visibility === "hidden") return false;
   }
   return true;
+}
+
+function isFocusable(element: HTMLElement) {
+  return element.tabIndex >= 0
+    && !element.matches(":disabled")
+    && !element.hasAttribute("disabled")
+    && isVisible(element);
+}
+
+function getFocusableElements(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    isFocusable,
+  );
 }
 
 interface ModalFocusOptions {
@@ -78,10 +77,14 @@ export function useModalFocus({
 
     const isTopModal = () => modalStack.at(-1) === token;
     const focusInitial = () => {
-      const target =
-        initialFocusRef.current ?? getFocusableElements(container)[0] ?? container;
+      const preferred = initialFocusRef.current;
+      const target = preferred && isFocusable(preferred)
+        ? preferred
+        : getFocusableElements(container)[0] ?? container;
       target.focus();
     };
+
+    if (!container.hasAttribute("tabindex")) container.tabIndex = -1;
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isTopModal()) return;
@@ -134,11 +137,16 @@ export function useModalFocus({
         ? Array.from(document.querySelectorAll<HTMLElement>("[data-modal-focus-id]"))
           .find((candidate) => candidate.dataset.modalFocusId === stableOpenerId
             && candidate !== opener
-            && isVisibleForRestore(candidate))
+            && isVisible(candidate))
         : null;
-      const restoreTarget = opener?.isConnected === true && isVisibleForRestore(opener)
+      const idReplacement = openerId ? document.getElementById(openerId) : null;
+      const fallback = Array.from(document.querySelectorAll<HTMLElement>("[data-modal-focus-fallback]"))
+        .find(isVisible);
+      const restoreTarget = opener?.isConnected === true && isVisible(opener)
         ? opener
-        : equivalent ?? (openerId ? document.getElementById(openerId) : null);
+        : equivalent
+          ?? (idReplacement && isVisible(idReplacement) ? idReplacement : null)
+          ?? fallback;
       restoreTarget?.focus();
     };
   }, [active, containerRef, initialFocusRef]);

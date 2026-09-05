@@ -86,7 +86,7 @@ export function ImageViewer({ attachments, initialIndex, onClose }: { attachment
     return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
   };
 
-  return <div ref={viewerRef} className="image-viewer" role="dialog" aria-modal="true" aria-labelledby="image-viewer-title">
+  return <div ref={viewerRef} className="image-viewer" role="dialog" tabIndex={-1} aria-modal="true" aria-labelledby="image-viewer-title">
     <header><span>{index + 1} / {attachments.length}</span><strong id="image-viewer-title" title={attachment.filename}>{attachment.filename}</strong><div><button type="button" className="viewer-download desktop-only" onClick={() => void download()} aria-label="下载截图"><Download size={17} /></button><button ref={closeRef} type="button" onClick={onClose} aria-label="关闭截图"><X size={20} /></button></div></header>
     <div className="viewer-stage"
       onTouchStart={(event) => {
