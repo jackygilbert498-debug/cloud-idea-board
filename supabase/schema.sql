@@ -98,6 +98,27 @@ drop trigger if exists attachments_touch_updated_at on public.attachments;
 create trigger attachments_touch_updated_at before update on public.attachments
 for each row execute function public.touch_updated_at();
 
+-- Acquire this statement-level mutex before any child row can be locked.
+create or replace function public.lock_attachment_consistency()
+returns trigger language plpgsql security invoker set search_path = '' as $$
+begin
+  perform pg_advisory_xact_lock(
+    hashtextextended('cloud-memo-board/attachment-consistency', 0)
+  );
+  return null;
+end;
+$$;
+
+drop trigger if exists attachments_lock_consistency on public.attachments;
+create trigger attachments_lock_consistency
+before insert or update or delete on public.attachments
+for each statement execute function public.lock_attachment_consistency();
+
+drop trigger if exists cards_lock_attachment_consistency on public.cards;
+create trigger cards_lock_attachment_consistency
+before update of user_id or delete on public.cards
+for each statement execute function public.lock_attachment_consistency();
+
 create or replace function public.track_original_text_updated_at()
 returns trigger language plpgsql security invoker set search_path = '' as $$
 begin
@@ -142,11 +163,44 @@ for each row execute function public.track_card_completion();
 -- two devices save at almost the same time.
 create or replace function public.enforce_focus_limit()
 returns trigger language plpgsql security invoker set search_path = '' as $$
-declare active_focus_count integer;
+declare
+  active_focus_count integer;
+  old_active boolean;
+  new_active boolean;
+  old_owner_lock bigint;
+  new_owner_lock bigint;
 begin
-  if new.focus and not new.archived and (tg_op = 'INSERT' or not old.focus or old.archived) then
-    -- One transaction at a time may acquire focus rows for the same owner.
-    perform pg_advisory_xact_lock(hashtextextended(new.user_id::text, 0));
+  new_active := new.focus and not new.archived;
+  old_active := tg_op = 'UPDATE' and old.focus and not old.archived;
+
+  if tg_op = 'INSERT' then
+    if new_active then
+      perform pg_advisory_xact_lock(hashtextextended(new.user_id::text, 0));
+    end if;
+  elsif old_active is distinct from new_active
+     or (old_active and new_active and old.user_id is distinct from new.user_id) then
+    if old_active then
+      old_owner_lock := hashtextextended(old.user_id::text, 0);
+    end if;
+    if new_active then
+      new_owner_lock := hashtextextended(new.user_id::text, 0);
+    end if;
+
+    if old_owner_lock is not null and new_owner_lock is not null then
+      perform pg_advisory_xact_lock(least(old_owner_lock, new_owner_lock));
+      if old_owner_lock <> new_owner_lock then
+        perform pg_advisory_xact_lock(greatest(old_owner_lock, new_owner_lock));
+      end if;
+    else
+      perform pg_advisory_xact_lock(coalesce(old_owner_lock, new_owner_lock));
+    end if;
+  end if;
+
+  if new_active and (
+    tg_op = 'INSERT'
+    or not old_active
+    or old.user_id is distinct from new.user_id
+  ) then
     select count(*) into active_focus_count
     from public.cards
     where user_id = new.user_id and focus and not archived and id <> coalesce(new.id, 0);
@@ -159,7 +213,7 @@ end;
 $$;
 
 drop trigger if exists cards_enforce_focus_limit on public.cards;
-create trigger cards_enforce_focus_limit before insert or update of focus, archived on public.cards
+create trigger cards_enforce_focus_limit before insert or update of user_id, focus, archived on public.cards
 for each row execute function public.enforce_focus_limit();
 
 create table if not exists public.ai_usage_daily (
@@ -184,12 +238,13 @@ declare
   provided_count integer;
   distinct_count integer;
 begin
-  -- Locking the parent serializes two reorder requests for the same card and
-  -- makes validation and update one atomic operation.
+  perform pg_advisory_xact_lock(
+    hashtextextended('cloud-memo-board/attachment-consistency', 0)
+  );
+
   perform 1
   from public.cards
-  where id = p_card_id and user_id = auth.uid()
-  for update;
+  where id = p_card_id and user_id = auth.uid();
   if not found then
     raise exception '无权调整此卡片的附件';
   end if;
