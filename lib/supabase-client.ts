@@ -89,11 +89,35 @@ function sessionStorageKey(storage: AuthStorage): string {
   return `sb-${projectRef()}-auth-token-session-${tabId}`;
 }
 
+function sessionRuntimeKey(): string {
+  let instanceId: string;
+  try { instanceId = crypto.randomUUID(); }
+  catch (reason) { throw new AuthStorageUnavailableError("无法创建当前页面会话通道，请重试", { cause: reason }); }
+  return `sb-${projectRef()}-auth-token-session-runtime-${instanceId}`;
+}
+
+/**
+ * Auth-js derives its BroadcastChannel identity from `storageKey`. A copied
+ * tab inherits sessionStorage, so the SDK key must be unique per client while
+ * token reads and writes still map to the stable per-tab snapshot namespace.
+ */
+function mappedSessionStorage(storage: AuthStorage, runtimeKey: string, stableKey: string): AuthStorage {
+  const mapKey = (key: string) => key === runtimeKey || key.startsWith(`${runtimeKey}-`)
+    ? `${stableKey}${key.slice(runtimeKey.length)}`
+    : key;
+  return {
+    getItem: (key) => storage.getItem(mapKey(key)),
+    setItem: (key, value) => storage.setItem(mapKey(key), value),
+    removeItem: (key) => storage.removeItem(mapKey(key)),
+  };
+}
+
 function authOptions(mode: AuthStorageMode): { storage: AuthStorage; storageKey?: string } {
   const { safe } = checkedStorage(mode);
-  return mode === "persistent"
-    ? { storage: safe }
-    : { storage: safe, storageKey: sessionStorageKey(safe) };
+  if (mode === "persistent") return { storage: safe };
+  const stableKey = sessionStorageKey(safe);
+  const runtimeKey = sessionRuntimeKey();
+  return { storage: mappedSessionStorage(safe, runtimeKey, stableKey), storageKey: runtimeKey };
 }
 
 function createConfiguredClient(mode: AuthStorageMode): SupabaseClient | null {

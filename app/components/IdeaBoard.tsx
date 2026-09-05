@@ -160,6 +160,7 @@ export function IdeaBoard({ userId, displayName, authMode, isIdentityActive, onU
   const localFieldRevisionsRef = useRef(new Map<number, Map<keyof CardRecord, number>>());
   const attachmentDeletionRevisionsRef = useRef(new Map<number, Map<string, number>>());
   const loadGenerationRef = useRef(0);
+  const reconcileInFlightRef = useRef<Promise<void> | null>(null);
   const identityActiveRef = useRef(isIdentityActive);
   useEffect(() => { identityActiveRef.current = isIdentityActive; }, [isIdentityActive]);
   const activeIdentity = useCallback(() => identityActiveRef.current(), []);
@@ -284,12 +285,19 @@ export function IdeaBoard({ userId, displayName, authMode, isIdentityActive, onU
     }
     setSyncState("syncing");
     try {
-      try {
-        await reconcileBoardAttachments();
-      } catch (reason) {
-        // Ready rows are still safe to load; stale operations stay hidden and
-        // will be retried on the next synchronization.
-        console.warn("未完成的截图操作暂未恢复，将在下次同步重试。", reason);
+      // Recovery is best-effort and user-scoped in the data layer. It must not
+      // consume the ready-list deadline; late completion has no UI/cache side
+      // effects, and rejection is always observed.
+      if (!reconcileInFlightRef.current) {
+        const recovery = reconcileBoardAttachments().catch((reason) => {
+          // Ready rows are still safe to load; stale operations stay hidden and
+          // will be retried on the next synchronization.
+          console.warn("未完成的截图操作暂未恢复，将在下次同步重试。", reason);
+        });
+        reconcileInFlightRef.current = recovery;
+        void recovery.finally(() => {
+          if (reconcileInFlightRef.current === recovery) reconcileInFlightRef.current = null;
+        });
       }
       const data = await withTimeout(listBoardCards(), LOAD_TIMEOUT, "同步超时，请检查网络后重试");
       if (!isCurrentLoad()) return cardsRef.current;

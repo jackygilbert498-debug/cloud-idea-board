@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { zipFunctions } from "@netlify/zip-it-and-ship-it";
 import { runReleaseVerification } from "../scripts/run-release-verification.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -156,8 +157,12 @@ test("release runner injects the selected SHA and propagates the verification ch
 
 test("release runner generates one shared build identity and uses non-recursive verification steps", async (t) => {
   const metadataDirectory = join(root, "generated", "release-contract-functions");
+  const bundleDirectory = join(tmpdir(), `release-functions-bundle-${process.pid}-${Date.now()}`);
   rmSync(metadataDirectory, { recursive: true, force: true });
-  t.after(() => rmSync(metadataDirectory, { recursive: true, force: true }));
+  t.after(() => {
+    rmSync(metadataDirectory, { recursive: true, force: true });
+    rmSync(bundleDirectory, { recursive: true, force: true });
+  });
   const beforeStatus = spawnSync("git", ["status", "--short"], { cwd: root, encoding: "utf8" }).stdout;
   const calls = [];
 
@@ -179,9 +184,31 @@ test("release runner generates one shared build identity and uses non-recursive 
     { command: "/tools/node", args: ["/tools/npm-cli.js", "run", "build"], sha: "0123456789abcdef", shell: false },
     { command: "/tools/node", args: ["/tools/npm-cli.js", "run", "test:artifact"], sha: "0123456789abcdef", shell: false },
   ]);
-  assert.deepEqual(readdirSync(metadataDirectory).sort(), ["build-metadata.mjs", "organize-idea.mts"]);
-  const metadataUrl = `${pathToFileURL(join(metadataDirectory, "build-metadata.mjs")).href}?test=${Date.now()}`;
-  assert.equal((await import(metadataUrl)).BUILD_SHA, "0123456789abcdef");
+  const bundled = await zipFunctions(metadataDirectory, bundleDirectory, {
+    basePath: root,
+    config: { "*": { nodeBundler: "esbuild" } },
+    configFileDirectories: [metadataDirectory],
+  });
+  assert.equal(bundled.length, 1);
+  assert.equal(bundled[0].name, "organize-idea");
+  assert.deepEqual(bundled[0].routes, [{
+    pattern: "/api/organize-idea",
+    literal: "/api/organize-idea",
+    methods: ["POST"],
+    prefer_static: undefined,
+  }]);
+  assert.deepEqual(bundled[0].trafficRules, {
+    action: {
+      type: "rate_limit",
+      config: {
+        rateLimitConfig: { windowLimit: 12, windowSize: 60, algorithm: "sliding_window" },
+        aggregate: { keys: [{ type: "ip" }, { type: "domain" }] },
+      },
+    },
+  });
+  assert.deepEqual(readdirSync(metadataDirectory).sort(), ["organize-idea.mts"]);
+  const generatedSource = readFileSync(join(metadataDirectory, "organize-idea.mts"), "utf8");
+  assert.equal(generatedSource.match(/0123456789abcdef/g)?.length, 1);
   const entryUrl = `${pathToFileURL(join(metadataDirectory, "organize-idea.mts")).href}?test=${Date.now()}`;
   const generatedFunction = await import(entryUrl);
   const records = [];
@@ -207,11 +234,8 @@ test("release runner restores previous function metadata when a child step fails
   const metadataDirectory = join(tmpdir(), `release-metadata-${process.pid}-${Date.now()}`);
   mkdirSync(metadataDirectory, { recursive: true });
   t.after(() => rmSync(metadataDirectory, { recursive: true, force: true }));
-  const metadataPath = join(metadataDirectory, "build-metadata.mjs");
   const entryPath = join(metadataDirectory, "organize-idea.mts");
-  const previousMetadata = 'export const BUILD_SHA = "feedface";\n';
   const previousEntry = "// previous generated entry\n";
-  writeFileSync(metadataPath, previousMetadata, "utf8");
   writeFileSync(entryPath, previousEntry, "utf8");
   let observedSha = "";
 
@@ -221,7 +245,7 @@ test("release runner restores previous function metadata when a child step fails
     environment: { VITE_BUILD_SHA: "0123456789abcdef", npm_execpath: "/tools/npm-cli.js" },
     nodeExecutable: "/tools/node",
     spawnVerification: () => {
-      const generated = readFileSync(metadataPath, "utf8");
+      const generated = readFileSync(entryPath, "utf8");
       observedSha = generated.match(/[0-9a-f]{16}/)?.[0] ?? "";
       return { status: 7 };
     },
@@ -229,8 +253,8 @@ test("release runner restores previous function metadata when a child step fails
 
   assert.equal(status, 7);
   assert.equal(observedSha, "0123456789abcdef");
-  assert.equal(readFileSync(metadataPath, "utf8"), previousMetadata);
   assert.equal(readFileSync(entryPath, "utf8"), previousEntry);
+  assert.deepEqual(readdirSync(metadataDirectory), ["organize-idea.mts"]);
   assert.equal(existsSync(`${metadataDirectory}-next`), false);
   assert.equal(existsSync(`${metadataDirectory}-previous`), false);
 });
@@ -283,6 +307,6 @@ test("Netlify delegates to the non-recursive release runner command", () => {
   assert.equal(packageJson.scripts["verify:release"], "node scripts/run-release-verification.mjs --verify");
   assert.equal(packageJson.scripts["verify:netlify"], "node scripts/run-release-verification.mjs --verify");
   assert.match(netlifyConfig, /command\s*=\s*"npm run verify:netlify"/);
-  assert.match(netlifyConfig, /directory\s*=\s*"generated\/netlify\/functions"/);
+  assert.match(netlifyConfig, /directory\s*=\s*"generated\/functions"/);
   assert.match(workflow, /VITE_BUILD_SHA:\s*\$\{\{\s*github\.sha\s*\}\}/);
 });

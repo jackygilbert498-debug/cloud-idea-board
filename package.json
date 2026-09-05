@@ -33,6 +33,7 @@
     "@electric-sql/pglite": "^0.5.8",
     "@eslint/js": "9.39.4",
     "@netlify/functions": "^6.0.0",
+    "@netlify/zip-it-and-ship-it": "15.4.0",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

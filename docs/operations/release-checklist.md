@@ -39,7 +39,7 @@
 
 - [ ] 焦点：同一用户并发获取焦点或转移 active owner 后，最终未归档 focus 卡不超过 3 条。
 - [ ] 额度：同一用户同一 UTC 日并发调用额度 RPC，恰好 `p_limit` 次成功，所有超额调用均拒绝。
-- [ ] 附件：reorder 与 `pending → ready`、`ready → deleting` 或 metadata delete 竞争时无死锁；最终 ready ID 集合完整且 `sort_order` 连续、唯一，并与已成功操作的序列化结果一致。
+- [ ] 附件：reorder 与 `pending → ready`、`ready → deleting` 或 metadata delete 竞争时无死锁；最终 ready ID 集合完整，按 `sort_order → created_at → id` 的稳定排序与某个合法串行执行结果一致。允许删除留下间隔或并发上传得到相同 `sort_order`，不得把连续/唯一误记为产品不变量。
 - [ ] 记录脱敏的 session 数、事务开始/完成时间、成功/失败分类和最终查询；不记录连接串、token、user ID 或内容。
 - 状态：`PASS / FAIL / pending_external`
 - 证据：
@@ -48,7 +48,7 @@
 
 - [ ] 核对 `VITE_SUPABASE_URL`、`VITE_SUPABASE_ANON_KEY`、`VITE_BUILD_SHA`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`AI_DAILY_QUOTA_LIMIT` 共 8 个名称，无拼写变体。
 - [ ] 浏览器变量只在 Builds；服务角色和 DeepSeek key 标为 secret 且只在 Functions；其余服务端变量只在 Functions。
-- [ ] Production、受信任的 Deploy Previews、受信任的 Branch deploys 按用途配置；不向未知 fork 预览暴露 secret；`VITE_BUILD_SHA` 不长期静态保存。Netlify 构建期合法 `COMMIT_REF` 同时生成前端和 Function metadata，Function 运行时不依赖该变量。
+- [ ] Production、受信任的 Deploy Previews、受信任的 Branch deploys 按用途配置；不向未知 fork 预览暴露 secret；`VITE_BUILD_SHA` 不长期静态保存。Netlify 构建期合法 `COMMIT_REF` 同时注入前端与唯一 Function 源码，Function 运行时不依赖该变量。
 - [ ] 发布模型为 `deepseek-v4-flash`，额度未显式设置时接受默认 20。
 - [ ] Supabase Redirect URL 精确包含生产和固定预览 origin，没有不必要通配。
 - 状态：`PASS / FAIL / pending_external`
@@ -64,7 +64,7 @@
 
 ## 6. 认证后桌面与 393px 验收
 
-- [ ] 桌面真实浏览器：默认保持登录、取消后仅当前标签页、只记邮箱不存密码、账号页邮箱/会话/短 SHA、修改密码与三个退出入口。
+- [ ] 桌面真实浏览器：默认保持登录；取消后只用当前页面的 sessionStorage，复制标签页仅继承初始快照且后续登录/退出不串事件；只记邮箱不存密码；账号页邮箱/会话/短 SHA、修改密码与三个退出入口正确。
 - [ ] 桌面业务链：创建、正常保存自动关弹层、超时待核对与迟到结果、刷新、焦点上限、AI 梳理/采用、附件上传/排序/查看/下载/删除/恢复。
 - [ ] 393px：导航/阶段/编辑/查看器、44px 触控目标、16px 输入、弹层双向焦点/Escape/恢复、移动图片粘贴提示和无文字丢失。
 - [ ] 清缓存退出只删除当前账号；普通/全局退出不误删。检查 console error、失败 network 和可访问名称。

@@ -6,7 +6,7 @@
   NODE_VERSION = "22"
 
 [functions]
-  directory = "generated/netlify/functions"
+  directory = "generated/functions"
   node_bundler = "esbuild"
 
 [[redirects]]

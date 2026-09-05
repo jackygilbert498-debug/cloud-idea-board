@@ -59,6 +59,16 @@ function successfulDeepSeekResponse(): Response {
   });
 }
 
+function jsonBodyWithUtf8Size(size: number): string {
+  const prefix = '{"originalText":"边界","padding":"';
+  const suffix = '"}';
+  const paddingLength = size - Buffer.byteLength(prefix + suffix);
+  assert.ok(paddingLength >= 0);
+  const body = `${prefix}${"x".repeat(paddingLength)}${suffix}`;
+  assert.equal(Buffer.byteLength(body), size);
+  return body;
+}
+
 test("normalizes safe DeepSeek schema variants without inventing fields", () => {
   const result = normalizeIdeaOrganization({
     suggested_title: "整理任务看板",
@@ -111,6 +121,66 @@ test("authenticates before parsing a malformed body", async () => {
   assert.deepEqual(calls, ["auth"]);
   assert.equal(response.status, 400);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "INVALID_JSON");
+});
+
+test("rejects missing, understated, or invalid content lengths by actual UTF-8 body bytes", async (t) => {
+  const cases: Array<{ name: string; body: string; headers: HeadersInit; status: number; code: string }> = [
+    { name: "missing length", body: jsonBodyWithUtf8Size(100_001), headers: {}, status: 413, code: "PAYLOAD_TOO_LARGE" },
+    { name: "understated length", body: jsonBodyWithUtf8Size(100_001), headers: { "Content-Length": "10" }, status: 413, code: "PAYLOAD_TOO_LARGE" },
+    { name: "invalid length", body: JSON.stringify({ originalText: "合法正文" }), headers: { "Content-Length": "not-a-number" }, status: 400, code: "INVALID_CONTENT_LENGTH" },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const calls: string[] = [];
+      const handler = createOrganizeIdeaHandler({
+        fetchImpl: (async (input) => {
+          const url = String(input);
+          if (url.endsWith("/auth/v1/user")) {
+            calls.push("auth");
+            return Response.json({ id: "server-user-id" });
+          }
+          calls.push(url.includes("consume_ai_daily_quota") ? "quota" : "deepseek");
+          return url.includes("consume_ai_daily_quota") ? Response.json(1) : successfulDeepSeekResponse();
+        }) as typeof fetch,
+        env: BASE_ENV,
+        logger: SILENT_LOGGER,
+      });
+
+      const response = await handler(ideaRequest(fixture.body, fixture.headers));
+
+      assert.equal(response.status, fixture.status);
+      assert.equal((await response.json() as { error: { code: string } }).error.code, fixture.code);
+      assert.deepEqual(calls, ["auth"]);
+    });
+  }
+});
+
+test("accepts a valid JSON request at the exact 100000-byte UTF-8 boundary", async () => {
+  const body = jsonBodyWithUtf8Size(100_000);
+  const calls: string[] = [];
+  const handler = createOrganizeIdeaHandler({
+    fetchImpl: (async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/v1/user")) {
+        calls.push("auth");
+        return Response.json({ id: "server-user-id" });
+      }
+      if (url.includes("consume_ai_daily_quota")) {
+        calls.push("quota");
+        return Response.json(1);
+      }
+      calls.push("deepseek");
+      return successfulDeepSeekResponse();
+    }) as typeof fetch,
+    env: BASE_ENV,
+    logger: SILENT_LOGGER,
+  });
+
+  const response = await handler(ideaRequest(body, { "Content-Length": "100000" }));
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, ["auth", "quota", "deepseek"]);
 });
 
 test("rejects unauthenticated requests before parsing the body", async () => {

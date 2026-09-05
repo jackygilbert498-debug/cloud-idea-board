@@ -291,7 +291,9 @@ function mapCard(row: DbCard): CardRecord {
     attachments: (row.attachments ?? [])
       .filter((attachment) => attachment.state === "ready")
       .map(mapAttachment)
-      .sort((left, right) => left.sortOrder - right.sortOrder || left.createdAt.localeCompare(right.createdAt)),
+      .sort((left, right) => left.sortOrder - right.sortOrder
+        || left.createdAt.localeCompare(right.createdAt)
+        || left.id.localeCompare(right.id)),
   };
 }
 

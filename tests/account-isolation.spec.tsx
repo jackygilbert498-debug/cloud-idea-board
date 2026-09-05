@@ -17,6 +17,8 @@ const board = vi.hoisted(() => ({
   cards: [] as CardRecord[],
   list: null as null | (() => Promise<CardRecord[]>),
   listCalls: 0,
+  reconcile: null as null | (() => Promise<void>),
+  reconcileCalls: 0,
   update: null as null | ((id: number, patch: CardPatch, known?: CardRecord) => Promise<CardRecord>),
   updateCalls: 0,
   updatePatches: [] as CardPatch[],
@@ -59,7 +61,10 @@ vi.mock("@/lib/supabase-board", async (importOriginal) => {
       board.listCalls += 1;
       return board.list ? board.list() : board.cards;
     },
-    reconcileBoardAttachments: async () => undefined,
+    reconcileBoardAttachments: async () => {
+      board.reconcileCalls += 1;
+      if (board.reconcile) await board.reconcile();
+    },
     updateBoardCard: async (id: number, patch: CardPatch, known?: CardRecord) => {
       board.updateCalls += 1;
       board.updatePatches.push(patch);
@@ -99,6 +104,8 @@ afterEach(async () => {
   board.cards = [];
   board.list = null;
   board.listCalls = 0;
+  board.reconcile = null;
+  board.reconcileCalls = 0;
   board.update = null;
   board.updateCalls = 0;
   board.updatePatches = [];
@@ -173,6 +180,51 @@ async function renderOnlineBoard() {
   await act(async () => root.render(<App />));
   await act(async () => { await Promise.resolve(); });
 }
+
+test("a never-settling attachment recovery cannot block the ready board projection", async () => {
+  board.cards = [card({ title: "云端可见卡片" })];
+  board.reconcile = () => new Promise(() => undefined);
+
+  await renderOnlineBoard();
+
+  await vi.waitFor(() => {
+    expect(container.querySelector(".task-card-main h3")?.textContent).toBe("云端可见卡片");
+  }, { timeout: 500 });
+  expect(board.reconcileCalls).toBe(1);
+  expect(board.listCalls).toBe(1);
+  expect(container.querySelector(".sync-status")?.textContent).toContain("已同步");
+
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await Promise.resolve();
+  });
+  await vi.waitFor(() => expect(board.listCalls).toBe(2));
+  expect(board.reconcileCalls).toBe(1);
+});
+
+test("a late recovery rejection after an account switch cannot pollute either board cache", async () => {
+  const recovery = deferred<void>();
+  board.cards = [card({ title: "Alice 卡片" })];
+  board.reconcile = () => recovery.promise;
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  await renderOnlineBoard();
+  await vi.waitFor(() => expect(container.querySelector(".task-card-main h3")?.textContent).toBe("Alice 卡片"));
+  const aliceCache = localStorage.getItem(boardCacheKey("alice"));
+
+  board.cards = [card({ title: "Bob 卡片" })];
+  await act(async () => auth.listener!("SIGNED_IN", session("bob")));
+  await vi.waitFor(() => expect(container.querySelector(".task-card-main h3")?.textContent).toBe("Bob 卡片"));
+  const bobCache = localStorage.getItem(boardCacheKey("bob"));
+
+  await act(async () => {
+    recovery.reject(new Error("迟到的恢复失败"));
+    await Promise.resolve();
+  });
+
+  expect(localStorage.getItem(boardCacheKey("alice"))).toBe(aliceCache);
+  expect(localStorage.getItem(boardCacheKey("bob"))).toBe(bobCache);
+  expect(warning).toHaveBeenCalled();
+});
 
 function changeTextarea(element: HTMLTextAreaElement, value: string) {
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(element, value);

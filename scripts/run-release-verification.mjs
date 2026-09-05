@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, relative, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ReleaseBuildShaError, validateReleaseBuildSha } from "./release-sha.mjs";
 
@@ -15,13 +15,9 @@ function readCurrentGitHead() {
   return result.stdout.trim();
 }
 
-const defaultMetadataDirectory = resolve(fileURLToPath(new URL("../generated/netlify/functions/", import.meta.url)));
+const defaultMetadataDirectory = resolve(fileURLToPath(new URL("../generated/functions/", import.meta.url)));
 const functionSource = fileURLToPath(new URL("../netlify/functions/organize-idea.mts", import.meta.url));
-
-function moduleSpecifier(fromDirectory, targetFile) {
-  const path = relative(fromDirectory, targetFile).split(sep).join("/");
-  return path.startsWith(".") ? path : `./${path}`;
-}
+const buildShaMarker = 'const RELEASE_BUILD_SHA = "development"; // RELEASE_BUILD_SHA_INJECTION';
 
 function stageGeneratedFunctions(buildSha, metadataDirectory) {
   const nextDirectory = `${metadataDirectory}-next`;
@@ -36,21 +32,16 @@ function stageGeneratedFunctions(buildSha, metadataDirectory) {
   rmSync(nextDirectory, { recursive: true, force: true });
   mkdirSync(nextDirectory, { recursive: true });
 
-  const sourceImport = moduleSpecifier(metadataDirectory, functionSource);
-  writeFileSync(
-    `${nextDirectory}/build-metadata.mjs`,
-    `export const BUILD_SHA = ${JSON.stringify(buildSha)};\n`,
-    "utf8",
-  );
+  const source = readFileSync(functionSource, "utf8");
+  if (source.split(buildShaMarker).length !== 2) {
+    throw new ReleaseBuildShaError("Function 构建身份标记缺失或不唯一。");
+  }
   writeFileSync(
     `${nextDirectory}/organize-idea.mts`,
-    [
-      `import { createOrganizeIdeaHandler, config } from ${JSON.stringify(sourceImport)};`,
-      'import { BUILD_SHA } from "./build-metadata.mjs";',
-      "export { BUILD_SHA, config };",
-      "export default createOrganizeIdeaHandler({ buildSha: BUILD_SHA });",
-      "",
-    ].join("\n"),
+    source.replace(
+      buildShaMarker,
+      `const RELEASE_BUILD_SHA = ${JSON.stringify(buildSha)}; // RELEASE_BUILD_SHA_INJECTION`,
+    ),
     "utf8",
   );
 

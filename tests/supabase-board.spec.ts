@@ -553,6 +553,18 @@ describe("attachment state machine", () => {
     expect(listed.attachments.map((item) => [item.id, item.state])).toEqual([[B_ID, "ready"]]);
   });
 
+  test("list gives equal attachment orders and timestamps a deterministic id tie-break", async () => {
+    fakeClient.cards.push(card(7));
+    fakeClient.attachments.push(
+      attachment(B_ID, "ready", { sort_order: 4, created_at: FRESH }),
+      attachment(A_ID, "ready", { sort_order: 4, created_at: FRESH }),
+    );
+
+    const [listed] = await listBoardCards();
+
+    expect(listed.attachments.map((item) => item.id)).toEqual([A_ID, B_ID]);
+  });
+
   test("upload persists pending metadata before the object and exposes it only after ready", async () => {
     const image = new File(["test"], "image.png", { type: "image/png" });
 

@@ -10,7 +10,7 @@
 
 桌面端支持多张截图的粘贴、拖入、上传、排序、查看和下载；手机端使用紧凑单列编辑文字并查看截图。附件通过 `pending → ready` 上传和 `ready → deleting` 删除状态收敛，界面只展示 `ready`。当前可重复迁移会保护已有 `sort_order`，重跑不会重置附件顺序。
 
-登录页默认勾选“在这台设备保持登录”，Supabase 会话写入 `localStorage`，浏览器重启后仍可登录。取消勾选后，会话只写入当前标签页独立的 `sessionStorage`，关闭该标签页会话即失效。应用只在勾选时保存 trim 后的邮箱；取消会移除已记邮箱，密码始终不写入应用存储，由浏览器密码管理器处理。
+登录页默认勾选“在这台设备保持登录”，Supabase 会话写入 `localStorage`，浏览器重启后仍可登录。取消勾选后，会话只写入当前标签页的 `sessionStorage`，关闭该标签页会话即失效；复制标签页可继承复制当刻的会话快照，但每个页面实例使用独立的 SDK 通道 key，之后的登录/退出事件不会跨页串写。应用只在勾选时保存 trim 后的邮箱；取消会移除已记邮箱，密码始终不写入应用存储，由浏览器密码管理器处理。
 
 个人账号页显示当前邮箱、会话方式和构建短 SHA（本地未注入合法 SHA 时显示“开发版”），并提供修改密码、退出当前设备、退出所有设备、退出并清除当前账号本机数据。清理不会影响其他账号、Supabase Auth 存储或无关浏览器数据。
 
@@ -30,7 +30,7 @@ npm.cmd run verify
 npm.cmd run verify:release
 ```
 
-`build:release` 与 `verify:release` 都会先校验 SHA 并生成前端与 Function 共用的构建 metadata；Netlify 使用 `verify:netlify`，从平台构建期 `COMMIT_REF` 取得同一 SHA。GitHub Actions 用 `github.sha` 调用 `verify:release`。任何入口都不会接受任意非 SHA 字符串。
+`build:release` 与 `verify:release` 都会先校验 SHA，并将同一构建身份注入前端及 Netlify 最终打包的唯一 Function 源码；Netlify 使用 `verify:netlify`，从平台构建期 `COMMIT_REF` 取得该 SHA。GitHub Actions 用 `github.sha` 调用 `verify:release`。任何入口都不会接受任意非 SHA 字符串。
 
 测试使用内存 PostgreSQL，不访问线上 Supabase，也不能替代远端双会话并发验收。初始化、迁移、Netlify 变量和发布步骤见 [部署说明](./部署说明.md)，逐步证据格式见 [发布检查清单](./docs/operations/release-checklist.md)。
 

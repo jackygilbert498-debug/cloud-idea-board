@@ -24,6 +24,26 @@ function deferred() {
   return { promise, resolve };
 }
 
+class MemoryStorage implements Storage {
+  private readonly values = new Map<string, string>();
+
+  get length() { return this.values.size; }
+  clear() { this.values.clear(); }
+  getItem(key: string) { return this.values.get(key) ?? null; }
+  key(index: number) { return [...this.values.keys()][index] ?? null; }
+  removeItem(key: string) { this.values.delete(key); }
+  setItem(key: string, value: string) { this.values.set(key, String(value)); }
+}
+
+function copyStorage(source: Storage): MemoryStorage {
+  const copy = new MemoryStorage();
+  for (let index = 0; index < source.length; index += 1) {
+    const key = source.key(index);
+    if (key) copy.setItem(key, source.getItem(key) ?? "");
+  }
+  return copy;
+}
+
 beforeEach(() => {
   vi.resetModules();
   vi.stubEnv("VITE_SUPABASE_URL", "https://project-ref.supabase.co");
@@ -37,7 +57,7 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks());
 
-test("persistent auth keeps the SDK default key while session auth uses a stable tab-specific key", async () => {
+test("persistent auth keeps the SDK default key while session clients rotate channel keys over one stable token mapping", async () => {
   const { configureSupabaseAuthMode } = await import("@/lib/supabase-client");
   const initialAuth = sdk.options[0].auth as Record<string, unknown>;
   expect(initialAuth.storage).toBeDefined();
@@ -47,12 +67,54 @@ test("persistent auth keeps the SDK default key while session auth uses a stable
   await configureSupabaseAuthMode("session");
   const firstSessionAuth = sdk.options[1].auth as Record<string, unknown>;
   expect(firstSessionAuth.storage).toBeDefined();
-  expect(firstSessionAuth.storageKey).toMatch(/^sb-project-ref-auth-token-session-[0-9a-f-]+$/);
-  const firstKey = firstSessionAuth.storageKey;
+  expect(firstSessionAuth.storageKey).toMatch(/^sb-project-ref-auth-token-session-runtime-[0-9a-f-]+$/);
+  const firstKey = firstSessionAuth.storageKey as string;
+  const firstStorage = firstSessionAuth.storage as Storage;
+  firstStorage.setItem(firstKey, "session-token");
+  const tabId = sessionStorage.getItem("cloud-memo-board:v2:auth-tab-id");
+  const stableKey = `sb-project-ref-auth-token-session-${tabId}`;
+  expect(sessionStorage.getItem(stableKey)).toBe("session-token");
+  expect(sessionStorage.getItem(firstKey)).toBeNull();
 
   await configureSupabaseAuthMode("persistent");
   await configureSupabaseAuthMode("session");
-  expect((sdk.options[3].auth as Record<string, unknown>).storageKey).toBe(firstKey);
+  const nextSessionAuth = sdk.options[3].auth as Record<string, unknown>;
+  const nextKey = nextSessionAuth.storageKey as string;
+  expect(nextKey).not.toBe(firstKey);
+  expect((nextSessionAuth.storage as Storage).getItem(nextKey)).toBe("session-token");
+});
+
+test("copied session snapshots keep their initial token but use isolated SDK channel identities", async () => {
+  const stableKey = "sb-project-ref-auth-token-session-copied-tab";
+  const originalTab = new MemoryStorage();
+  originalTab.setItem("cloud-memo-board:v2:auth-mode", "session");
+  originalTab.setItem("cloud-memo-board:v2:auth-tab-id", "copied-tab");
+  originalTab.setItem(stableKey, "alice-session-token");
+  const sessionStorageGetter = vi.spyOn(window, "sessionStorage", "get").mockReturnValue(originalTab);
+
+  await import("@/lib/supabase-client");
+  const firstAuth = sdk.options.at(-1)!.auth as { storage: Storage; storageKey: string };
+  expect(firstAuth.storage.getItem(firstAuth.storageKey)).toBe("alice-session-token");
+
+  const copiedTab = copyStorage(originalTab);
+  sessionStorageGetter.mockReturnValue(copiedTab);
+  vi.resetModules();
+  await import("@/lib/supabase-client");
+  const copiedAuth = sdk.options.at(-1)!.auth as { storage: Storage; storageKey: string };
+  expect(copiedAuth.storageKey).not.toBe(firstAuth.storageKey);
+  expect(copiedAuth.storage.getItem(copiedAuth.storageKey)).toBe("alice-session-token");
+
+  firstAuth.storage.setItem(`${firstAuth.storageKey}-code-verifier`, "original-only");
+  expect(originalTab.getItem(`${stableKey}-code-verifier`)).toBe("original-only");
+  expect(copiedAuth.storage.getItem(`${copiedAuth.storageKey}-code-verifier`)).toBeNull();
+
+  sessionStorageGetter.mockReturnValue(originalTab);
+  vi.resetModules();
+  await import("@/lib/supabase-client");
+  const reloadedAuth = sdk.options.at(-1)!.auth as { storage: Storage; storageKey: string };
+  expect(reloadedAuth.storageKey).not.toBe(firstAuth.storageKey);
+  expect(reloadedAuth.storage.getItem(reloadedAuth.storageKey)).toBe("alice-session-token");
+  expect(localStorage.length).toBe(0);
 });
 
 test("a target storage failure is detected before disposal and a later switch can retry", async () => {

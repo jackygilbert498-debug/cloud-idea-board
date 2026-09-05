@@ -3,7 +3,9 @@ import { normalizeIdeaOrganization } from "../../lib/idea-organizer-model.ts";
 
 const PROMPT_VERSION = "memo-organizer-v3";
 const MAX_ORIGINAL_TEXT = 20_000;
+const MAX_REQUEST_BODY_BYTES = 100_000;
 const TOTAL_REQUEST_TIMEOUT = 38_000;
+const RELEASE_BUILD_SHA = "development"; // RELEASE_BUILD_SHA_INJECTION
 const DEEPSEEK_TIMEOUT = 35_000;
 const AUTH_TIMEOUT = 8_000;
 const QUOTA_TIMEOUT = 5_000;
@@ -142,13 +144,41 @@ async function verifyUser(
 }
 
 async function readOriginalText(request: Request): Promise<string> {
-  const contentLength = Number(request.headers.get("content-length") ?? 0);
-  if (Number.isFinite(contentLength) && contentLength > 100_000) {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null && !/^\d+$/.test(declaredLength)) {
+    throw new ApiFailure("INVALID_CONTENT_LENGTH", 400, "请求长度格式不正确。");
+  }
+  if (declaredLength !== null && BigInt(declaredLength) > BigInt(MAX_REQUEST_BODY_BYTES)) {
     throw new ApiFailure("PAYLOAD_TOO_LARGE", 413, "原始想法内容过长。");
+  }
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  if (reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        byteLength += value.byteLength;
+        if (byteLength > MAX_REQUEST_BODY_BYTES) {
+          void reader.cancel().catch(() => undefined);
+          throw new ApiFailure("PAYLOAD_TOO_LARGE", 413, "原始想法内容过长。");
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   let body: { originalText?: unknown } | null;
   try {
-    body = await request.json() as { originalText?: unknown } | null;
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as { originalText?: unknown } | null;
   } catch {
     throw new ApiFailure("INVALID_JSON", 400, "请求内容格式不正确。");
   }
@@ -322,7 +352,7 @@ function emitLog(logger: Pick<Console, "error" | "warn" | "info">, record: LogRe
 export function createOrganizeIdeaHandler({
   fetchImpl = fetch,
   env = process.env,
-  buildSha = "development",
+  buildSha = RELEASE_BUILD_SHA,
   logger = console,
   now = Date.now,
   timeoutSignal = (milliseconds) => AbortSignal.timeout(milliseconds),
