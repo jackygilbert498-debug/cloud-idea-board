@@ -543,6 +543,58 @@ test.each(["length", "key", "removeItem"] as const)(
   },
 );
 
+test("a partially completed local cleanup resumes without repeating remote sign-out", async () => {
+  appAuth.mode = "session";
+  appAuth.initial.state.getSession = async () => ({ data: { session: testSession("alice") }, error: null });
+  appAuth.initial.state.signOut = async () => {
+    appAuth.initial.state.listener!("SIGNED_OUT", null);
+    return { error: null };
+  };
+  const aliceKeys = [boardCacheKey("alice"), draftKey("alice", 1)];
+  localStorage.setItem(aliceKeys[0], "alice-board");
+  localStorage.setItem(aliceKeys[1], "alice-draft");
+  localStorage.setItem(boardCacheKey("bob"), "bob-board");
+  localStorage.setItem("sb-project-ref-auth-token", "auth-token");
+  localStorage.setItem("unrelated", "keep");
+  let aliceRemovalCalls = 0;
+  const nativeRemoveItem = Storage.prototype.removeItem;
+  const failure = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(function (this: Storage, key) {
+    if (this === localStorage && aliceKeys.includes(key)) {
+      aliceRemovalCalls += 1;
+      if (aliceRemovalCalls === 2) throw new DOMException("removeItem disabled", "SecurityError");
+    }
+    return nativeRemoveItem.call(this, key);
+  });
+  await renderApp();
+
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>("button")!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(container.textContent).toContain("已退出，但本机数据尚未清除");
+  expect(aliceRemovalCalls).toBe(2);
+  expect(aliceKeys.filter((key) => localStorage.getItem(key) !== null)).toHaveLength(1);
+  expect(appAuth.initial.state.signOutCalls).toEqual([{ scope: "local" }]);
+  expect(appAuth.clearUrlCalls).toBe(0);
+  failure.mockRestore();
+  const retry = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => button.textContent?.includes("重试清除本机数据"))!;
+
+  await act(async () => {
+    retry.click();
+    await Promise.resolve();
+  });
+
+  expect(aliceKeys.every((key) => localStorage.getItem(key) === null)).toBe(true);
+  expect(localStorage.getItem(boardCacheKey("bob"))).toBe("bob-board");
+  expect(localStorage.getItem("sb-project-ref-auth-token")).toBe("auth-token");
+  expect(localStorage.getItem("unrelated")).toBe("keep");
+  expect(appAuth.initial.state.signOutCalls).toEqual([{ scope: "local" }]);
+  expect(appAuth.clearUrlCalls).toBe(1);
+});
+
 test("SIGNED_OUT resets recovery so a later sign-in does not reopen password recovery", async () => {
   appAuth.initial.state.getSession = async () => ({ data: { session: testSession("alice") }, error: null });
   await renderApp();
