@@ -1,22 +1,55 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 const root = new URL("../", import.meta.url);
 const dist = new URL("../dist/", import.meta.url);
+const distPath = fileURLToPath(dist);
+
+function resolveStaticFile(requestUrl) {
+  try {
+    const pathname = decodeURIComponent(new URL(requestUrl, "http://127.0.0.1").pathname);
+    const requestedFile = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+    const filePath = resolve(distPath, requestedFile);
+    const relativePath = relative(distPath, filePath);
+
+    if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+      return null;
+    }
+
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
+function contentTypeFor(filePath) {
+  if (extname(filePath) === ".js") return "application/javascript; charset=utf-8";
+  if (extname(filePath) === ".css") return "text/css; charset=utf-8";
+  if (extname(filePath) === ".html") return "text/html; charset=utf-8";
+  return "application/octet-stream";
+}
 
 async function startStaticEntrypoint() {
   const server = createServer(async (request, response) => {
-    if (request.url !== "/" && request.url !== "/index.html") {
+    const filePath = resolveStaticFile(request.url ?? "/");
+    if (!filePath) {
       response.writeHead(404).end();
       return;
     }
 
     try {
-      const indexHtml = await readFile(new URL("index.html", dist));
-      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(indexHtml);
-    } catch {
+      const content = await readFile(filePath);
+      response.writeHead(200, { "Content-Type": contentTypeFor(filePath) }).end(content);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && ["ENOENT", "EISDIR"].includes(error.code)) {
+        response.writeHead(404).end();
+        return;
+      }
+
       response.writeHead(500).end();
     }
   });
@@ -43,8 +76,17 @@ test("ships a runnable static entrypoint with the configured public Supabase URL
   try {
     const address = server.address();
     assert.ok(address && typeof address !== "string");
-    const response = await fetch(`http://127.0.0.1:${address.port}/`);
-    assert.equal(response.status, 200);
+    const origin = `http://127.0.0.1:${address.port}`;
+    const entrypointResponse = await fetch(`${origin}/`);
+    assert.equal(entrypointResponse.status, 200);
+
+    const moduleResponse = await fetch(`${origin}${modulePath}`);
+    assert.equal(moduleResponse.status, 200);
+    assert.match(moduleResponse.headers.get("content-type") ?? "", /^application\/javascript(?:;|$)/);
+    assert.ok((await moduleResponse.text()).includes(publicSupabaseUrl));
+
+    const traversalResponse = await fetch(`${origin}/%2e%2e%2fpackage.json`);
+    assert.equal(traversalResponse.status, 404);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
