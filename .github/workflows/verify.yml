@@ -13,7 +13,7 @@ jobs:
     env:
       VITE_SUPABASE_URL: https://test.supabase.co
       VITE_SUPABASE_ANON_KEY: test-public-key-with-more-than-20-characters
-      VITE_BUILD_SHA: 0123456789abcdef
+      VITE_BUILD_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

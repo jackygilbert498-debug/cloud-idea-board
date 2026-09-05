@@ -13,7 +13,6 @@ const BASE_ENV: NodeJS.ProcessEnv = {
   DEEPSEEK_API_KEY: DEEPSEEK_KEY,
   DEEPSEEK_MODEL: "deepseek-v4-pro",
   AI_DAILY_QUOTA_LIMIT: "20",
-  COMMIT_REF: "deploy-sha-123",
 };
 const FUNCTION_CONTEXT = { requestId: "trusted-context-request-123" };
 const SILENT_LOGGER = {
@@ -505,6 +504,7 @@ test("emits one structured log record containing only approved non-sensitive fie
       return successfulDeepSeekResponse();
     }) as typeof fetch,
     env: BASE_ENV,
+    buildSha: "0123456789abcdef",
     logger,
     now: (() => {
       const values = [1_000, 1_075];
@@ -519,7 +519,7 @@ test("emits one structured log record containing only approved non-sensitive fie
   assert.deepEqual(records[0], [{
     event: "organize_idea",
     request_id: "trusted-context-request-123",
-    deploy_sha: "deploy-sha-123",
+    deploy_sha: "0123456789abcdef",
     model: "deepseek-v4-pro",
     outcome: "success",
     status: 200,

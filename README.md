@@ -24,11 +24,13 @@
 npm.cmd run verify
 ```
 
-`verify` 包含 lint、TypeScript、unit、regression 和发布契约测试。完整构建门禁还需先提供无权限公开测试用的 `VITE_SUPABASE_URL`、`VITE_SUPABASE_ANON_KEY`、`VITE_BUILD_SHA`，再运行：
+`verify` 包含 lint、TypeScript、unit、regression 和发布契约测试。完整构建门禁还需先提供无权限公开测试用的 `VITE_SUPABASE_URL`、`VITE_SUPABASE_ANON_KEY`；`VITE_BUILD_SHA` 可显式提供，缺省时从当前 git HEAD 获取。然后运行：
 
 ```powershell
 npm.cmd run verify:release
 ```
+
+`build:release` 与 `verify:release` 都会先校验 SHA 并生成前端与 Function 共用的构建 metadata；Netlify 使用 `verify:netlify`，从平台构建期 `COMMIT_REF` 取得同一 SHA。GitHub Actions 用 `github.sha` 调用 `verify:release`。任何入口都不会接受任意非 SHA 字符串。
 
 测试使用内存 PostgreSQL，不访问线上 Supabase，也不能替代远端双会话并发验收。初始化、迁移、Netlify 变量和发布步骤见 [部署说明](./部署说明.md)，逐步证据格式见 [发布检查清单](./docs/operations/release-checklist.md)。
 

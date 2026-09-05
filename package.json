@@ -17,10 +17,11 @@
     "typecheck": "tsc --noEmit --incremental false",
     "test:contracts": "node --test tests/release-pipeline.test.mjs",
     "test:artifact": "node --test tests/netlify-build.test.mjs",
+    "validate:release-env": "node scripts/validate-release-env.mjs",
     "verify": "npm run lint && npm run typecheck && npm run test:unit && npm run test:regression && npm run test:contracts",
-    "build:release": "node scripts/validate-release-env.mjs && vite build",
-    "verify:release": "npm run verify && npm run build:release && npm run test:artifact",
-    "verify:netlify": "node scripts/run-release-verification.mjs"
+    "build:release": "node scripts/run-release-verification.mjs --build",
+    "verify:release": "node scripts/run-release-verification.mjs --verify",
+    "verify:netlify": "node scripts/run-release-verification.mjs --verify"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

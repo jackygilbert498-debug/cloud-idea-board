@@ -1,21 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { ReleaseBuildShaError, validateReleaseBuildSha } from "./release-sha.mjs";
 
-const SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
-
-export class ReleaseBuildShaError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ReleaseBuildShaError";
-  }
-}
-
-function validateSha(value, source) {
-  if (!SHA_PATTERN.test(value)) {
-    throw new ReleaseBuildShaError(`${source} 必须是 7 至 64 位十六进制提交 SHA。`);
-  }
-  return value;
-}
+export { ReleaseBuildShaError } from "./release-sha.mjs";
 
 function readCurrentGitHead() {
   const result = spawnSync("git", ["rev-parse", "--verify", "HEAD"], {
@@ -26,23 +15,89 @@ function readCurrentGitHead() {
   return result.stdout.trim();
 }
 
+const defaultMetadataDirectory = resolve(fileURLToPath(new URL("../generated/netlify/functions/", import.meta.url)));
+const functionSource = fileURLToPath(new URL("../netlify/functions/organize-idea.mts", import.meta.url));
+
+function moduleSpecifier(fromDirectory, targetFile) {
+  const path = relative(fromDirectory, targetFile).split(sep).join("/");
+  return path.startsWith(".") ? path : `./${path}`;
+}
+
+function stageGeneratedFunctions(buildSha, metadataDirectory) {
+  const nextDirectory = `${metadataDirectory}-next`;
+  const previousDirectory = `${metadataDirectory}-previous`;
+  mkdirSync(dirname(metadataDirectory), { recursive: true });
+
+  // Recover a prior interrupted directory swap before preparing this build.
+  if (existsSync(previousDirectory)) {
+    rmSync(metadataDirectory, { recursive: true, force: true });
+    renameSync(previousDirectory, metadataDirectory);
+  }
+  rmSync(nextDirectory, { recursive: true, force: true });
+  mkdirSync(nextDirectory, { recursive: true });
+
+  const sourceImport = moduleSpecifier(metadataDirectory, functionSource);
+  writeFileSync(
+    `${nextDirectory}/build-metadata.mjs`,
+    `export const BUILD_SHA = ${JSON.stringify(buildSha)};\n`,
+    "utf8",
+  );
+  writeFileSync(
+    `${nextDirectory}/organize-idea.mts`,
+    [
+      `import { createOrganizeIdeaHandler, config } from ${JSON.stringify(sourceImport)};`,
+      'import { BUILD_SHA } from "./build-metadata.mjs";',
+      "export { BUILD_SHA, config };",
+      "export default createOrganizeIdeaHandler({ buildSha: BUILD_SHA });",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  if (existsSync(metadataDirectory)) renameSync(metadataDirectory, previousDirectory);
+  try {
+    renameSync(nextDirectory, metadataDirectory);
+  } catch (error) {
+    if (existsSync(previousDirectory)) renameSync(previousDirectory, metadataDirectory);
+    throw error;
+  }
+
+  let active = true;
+  return {
+    commit() {
+      if (!active) return;
+      rmSync(previousDirectory, { recursive: true, force: true });
+      active = false;
+    },
+    rollback() {
+      if (!active) return;
+      rmSync(metadataDirectory, { recursive: true, force: true });
+      if (existsSync(previousDirectory)) renameSync(previousDirectory, metadataDirectory);
+      rmSync(nextDirectory, { recursive: true, force: true });
+      active = false;
+    },
+  };
+}
+
 /** Resolve one traceable SHA without ever interpolating it into a shell command. */
 export function resolveReleaseBuildSha(environment, readGitHead = readCurrentGitHead) {
   const commitRef = environment.COMMIT_REF?.trim();
-  if (commitRef) return validateSha(commitRef, "COMMIT_REF");
+  if (commitRef) return validateReleaseBuildSha(commitRef, "COMMIT_REF");
 
   const providedSha = environment.VITE_BUILD_SHA?.trim();
-  if (providedSha) return validateSha(providedSha, "VITE_BUILD_SHA");
+  if (providedSha) return validateReleaseBuildSha(providedSha, "VITE_BUILD_SHA");
 
   const gitHead = readGitHead()?.trim();
-  if (gitHead) return validateSha(gitHead, "git HEAD");
+  if (gitHead) return validateReleaseBuildSha(gitHead, "git HEAD");
 
   throw new ReleaseBuildShaError("无法从 COMMIT_REF、VITE_BUILD_SHA 或 git HEAD 确定发布提交。");
 }
 
 /** Run the existing release gate and preserve its exit code for Netlify. */
 export function runReleaseVerification({
+  mode = "verify",
   environment = process.env,
+  metadataDirectory = defaultMetadataDirectory,
   nodeExecutable = process.execPath,
   readGitHead = readCurrentGitHead,
   spawnVerification = spawnSync,
@@ -50,22 +105,43 @@ export function runReleaseVerification({
   const buildSha = resolveReleaseBuildSha(environment, readGitHead);
   const npmExecPath = environment.npm_execpath?.trim();
   if (!npmExecPath) throw new ReleaseBuildShaError("npm 执行入口不可用，请通过 npm run verify:netlify 启动。");
-  const result = spawnVerification(nodeExecutable, [npmExecPath, "run", "verify:release"], {
-    env: { ...environment, VITE_BUILD_SHA: buildSha },
-    shell: false,
-    stdio: "inherit",
-  });
+  const steps = mode === "build"
+    ? ["validate:release-env", "build"]
+    : mode === "verify"
+      ? ["verify", "validate:release-env", "build", "test:artifact"]
+      : null;
+  if (!steps) throw new ReleaseBuildShaError("未知的发布验证模式。");
 
-  if (result.error || !Number.isInteger(result.status)) {
-    throw new ReleaseBuildShaError("无法启动发布验证子进程。");
+  const generated = stageGeneratedFunctions(buildSha, metadataDirectory);
+  try {
+    for (const step of steps) {
+      const result = spawnVerification(nodeExecutable, [npmExecPath, "run", step], {
+        env: { ...environment, VITE_BUILD_SHA: buildSha },
+        shell: false,
+        stdio: "inherit",
+      });
+      if (result.error || !Number.isInteger(result.status)) {
+        throw new ReleaseBuildShaError("无法启动发布验证子进程。");
+      }
+      if (result.status !== 0) {
+        generated.rollback();
+        return result.status;
+      }
+    }
+    generated.commit();
+    return 0;
+  } catch (error) {
+    generated.rollback();
+    throw error;
   }
-  return result.status;
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (invokedPath === import.meta.url) {
   try {
-    process.exitCode = runReleaseVerification();
+    const mode = process.argv[2] === "--build" ? "build" : process.argv[2] === "--verify" ? "verify" : null;
+    if (!mode) throw new ReleaseBuildShaError("请使用 --build 或 --verify 启动发布验证。");
+    process.exitCode = runReleaseVerification({ mode });
   } catch (error) {
     console.error(error instanceof Error ? error.message : "发布验证启动失败。");
     process.exitCode = 1;

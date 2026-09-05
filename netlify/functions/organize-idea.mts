@@ -46,6 +46,7 @@ class ApiFailure extends Error {
 type HandlerDependencies = {
   fetchImpl?: typeof fetch;
   env?: NodeJS.ProcessEnv;
+  buildSha?: string;
   logger?: Pick<Console, "error" | "warn" | "info">;
   now?: () => number;
   timeoutSignal?: (milliseconds: number) => AbortSignal;
@@ -321,6 +322,7 @@ function emitLog(logger: Pick<Console, "error" | "warn" | "info">, record: LogRe
 export function createOrganizeIdeaHandler({
   fetchImpl = fetch,
   env = process.env,
+  buildSha = "development",
   logger = console,
   now = Date.now,
   timeoutSignal = (milliseconds) => AbortSignal.timeout(milliseconds),
@@ -373,7 +375,7 @@ export function createOrganizeIdeaHandler({
       emitLog(logger, {
         event: "organize_idea",
         request_id: requestId,
-        deploy_sha: safeIdentifier(env.COMMIT_REF, "unknown"),
+        deploy_sha: safeIdentifier(buildSha, "development"),
         model,
         outcome,
         status,

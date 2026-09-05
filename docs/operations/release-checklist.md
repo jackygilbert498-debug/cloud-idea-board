@@ -17,7 +17,11 @@
 
 - [ ] 确认候选来自公开 GitHub 仓库，记录 remote、分支、完整 SHA 和 `git status --short`。
 - [ ] 确认本地历史 `C:\Users\zfy20\Desktop\任务看板\云端部署` 未参与构建、未修改，继续只读保留。
-- [ ] 运行 Node 22 下的 `npm.cmd run verify`，记录逐项退出码和测试计数。
+- [ ] 确认 Node 22（最低 22.13.0），从锁文件运行 `npm.cmd ci`；依赖安装失败不能沿用旧 `node_modules` 判 PASS。
+- [ ] 以公开、无权限测试配置运行 `npm.cmd run verify:release`，记录 lint、typecheck、unit、regression、contracts、build、artifact 的退出码和测试计数。Netlify 随后必须单独通过 `npm run verify:netlify`，不能用本地命令替代平台构建。
+- [ ] 运行 `npm.cmd audit --omit=dev --audit-level=low --registry=https://registry.npmjs.org`；任何达到阈值的生产依赖问题都阻断发布。
+- [ ] 运行 `git grep -Il -E "(sk-[A-Za-z0-9]{20,}|sb_secret_[A-Za-z0-9_-]{20,}|service_role.{0,20}[A-Za-z0-9_-]{40,})" -- . ":!package-lock.json"`；预期无文件名输出，Git exit 1 表示没有 tracked 匹配。若输出任何文件，立即停止且不得把匹配内容复制到证据。
+- [ ] 上述 install、release verification、audit、tracked secret scan 全部有独立证据；任一未执行、失败或无法授权时，本步骤不得填写 PASS。
 - 状态：`PASS / FAIL / pending_external`
 - 证据：
 
@@ -44,7 +48,7 @@
 
 - [ ] 核对 `VITE_SUPABASE_URL`、`VITE_SUPABASE_ANON_KEY`、`VITE_BUILD_SHA`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`AI_DAILY_QUOTA_LIMIT` 共 8 个名称，无拼写变体。
 - [ ] 浏览器变量只在 Builds；服务角色和 DeepSeek key 标为 secret 且只在 Functions；其余服务端变量只在 Functions。
-- [ ] Production、受信任的 Deploy Previews、受信任的 Branch deploys 按用途配置；不向未知 fork 预览暴露 secret；`VITE_BUILD_SHA` 不长期静态保存，由合法 `COMMIT_REF` 注入。
+- [ ] Production、受信任的 Deploy Previews、受信任的 Branch deploys 按用途配置；不向未知 fork 预览暴露 secret；`VITE_BUILD_SHA` 不长期静态保存。Netlify 构建期合法 `COMMIT_REF` 同时生成前端和 Function metadata，Function 运行时不依赖该变量。
 - [ ] 发布模型为 `deepseek-v4-flash`，额度未显式设置时接受默认 20。
 - [ ] Supabase Redirect URL 精确包含生产和固定预览 origin，没有不必要通配。
 - 状态：`PASS / FAIL / pending_external`
@@ -53,7 +57,7 @@
 ## 5. 固定预览构建与发布
 
 - [ ] 从冻结候选 SHA 创建固定预览 alias；记录 build/deploy SHA，确认不是临时未固定 URL。
-- [ ] Netlify 运行 `npm run verify:netlify`，wrapper 使用 `COMMIT_REF` 注入 SHA；验证、构建或 artifact 任一失败都阻断部署。
+- [ ] Netlify 运行 `npm run verify:netlify`，wrapper 使用构建期 `COMMIT_REF` 生成前端/Function 共用 SHA；验证、构建或 artifact 任一失败都阻断部署。
 - [ ] 检查安全响应头、`index.html` no-cache、静态 asset immutable cache、SPA 深链接和 Function no-store/request ID。
 - 状态：`PASS / FAIL / pending_external`
 - 证据：
