@@ -5,6 +5,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 import App from "@/src/App";
 import { boardCacheKey, draftKey } from "@/lib/local-state";
+import { AttachmentDeleteError } from "@/lib/supabase-board";
 import type { AttachmentRecord, CardPatch, CardRecord } from "@/lib/types";
 
 const auth = vi.hoisted(() => ({
@@ -14,9 +15,13 @@ const auth = vi.hoisted(() => ({
 const board = vi.hoisted(() => ({
   cards: [] as CardRecord[],
   list: null as null | (() => Promise<CardRecord[]>),
+  listCalls: 0,
   update: null as null | ((id: number, patch: CardPatch, known?: CardRecord) => Promise<CardRecord>),
   updateCalls: 0,
   updatePatches: [] as CardPatch[],
+  upload: null as null | ((cardId: number, file: File) => Promise<void>),
+  reorder: null as null | ((cardId: number, ids: string[]) => Promise<void>),
+  remove: null as null | ((attachment: AttachmentRecord) => Promise<void>),
 }));
 // Remote boundaries are replaced; App, IdeaBoard and the local draft/cache path are real.
 vi.mock("@/lib/supabase-client", () => ({
@@ -33,7 +38,10 @@ vi.mock("@/lib/supabase-board", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/supabase-board")>();
   return {
     ...original,
-    listBoardCards: async () => board.list ? board.list() : board.cards,
+    listBoardCards: async () => {
+      board.listCalls += 1;
+      return board.list ? board.list() : board.cards;
+    },
     reconcileBoardAttachments: async () => undefined,
     updateBoardCard: async (id: number, patch: CardPatch, known?: CardRecord) => {
       board.updateCalls += 1;
@@ -41,6 +49,15 @@ vi.mock("@/lib/supabase-board", async (importOriginal) => {
       if (board.update) return board.update(id, patch, known);
       if (!known) throw new Error("missing card fixture");
       return { ...known, ...patch, updatedAt: "2026-09-06T02:00:00Z" };
+    },
+    uploadBoardAttachment: async (cardId: number, file: File) => {
+      if (board.upload) await board.upload(cardId, file);
+    },
+    reorderBoardAttachments: async (cardId: number, ids: string[]) => {
+      if (board.reorder) await board.reorder(cardId, ids);
+    },
+    deleteBoardAttachment: async (attachment: AttachmentRecord) => {
+      if (board.remove) await board.remove(attachment);
     },
   };
 });
@@ -59,9 +76,13 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   board.cards = [];
   board.list = null;
+  board.listCalls = 0;
   board.update = null;
   board.updateCalls = 0;
   board.updatePatches = [];
+  board.upload = null;
+  board.reorder = null;
+  board.remove = null;
   auth.listener = null;
   auth.session = null;
 });
@@ -119,6 +140,7 @@ function attachment(id: string, sortOrder: number): AttachmentRecord {
 
 async function renderOnlineBoard() {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("matchMedia", () => ({ matches: false }));
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
   auth.session = session("alice");
   root = createRoot(container);
@@ -449,6 +471,71 @@ test("same-card requests are applied in mutation order for different fields and 
   expect(board.updateCalls).toBe(3);
 });
 
+test("a queued focus request revalidates the limit after the prior optimistic focus fails", async () => {
+  board.cards = [
+    card(),
+    card({ id: 2, title: "焦点二", focus: true, sortOrder: 2 }),
+    card({ id: 3, title: "焦点三", focus: true, sortOrder: 3 }),
+    card({ id: 4, title: "焦点四", focus: true, sortOrder: 4 }),
+  ];
+  const first = deferred<CardRecord>();
+  board.update = async (_id, patch, known) => {
+    if (board.updateCalls === 1) return first.promise;
+    if (patch.focus === true) {
+      if (known?.stage === "done") throw new Error("已完成记录不能设为今日焦点");
+      if (!known?.focus) throw new Error("今日焦点最多保留 3 条");
+    }
+    return { ...known!, ...patch, updatedAt: "2026-09-06T05:00:00Z" };
+  };
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  const focus = Array.from(container.querySelectorAll<HTMLButtonElement>(".editor-options button"))
+    .find((button) => button.textContent?.includes("今日焦点"))!;
+  await act(async () => focus.click());
+  await act(async () => focus.click());
+  expect(board.updateCalls).toBe(1);
+
+  await act(async () => {
+    first.reject(new Error("首次焦点保存失败"));
+    await Promise.resolve();
+  });
+  await vi.waitFor(() => expect(board.updateCalls).toBe(2));
+
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached.find((item) => item.id === 1)?.focus).toBe(false);
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("今日焦点最多保留 3 条");
+});
+
+test("a queued focus request uses the restored active stage after a failed move to done", async () => {
+  board.cards = [card()];
+  const first = deferred<CardRecord>();
+  board.update = async (_id, patch, known) => {
+    if (board.updateCalls === 1) return first.promise;
+    if (patch.focus === true && known?.stage === "done") {
+      throw new Error("已完成记录不能设为今日焦点");
+    }
+    return { ...known!, ...patch, updatedAt: "2026-09-06T05:30:00Z" };
+  };
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  const focus = Array.from(container.querySelectorAll<HTMLButtonElement>(".editor-options button"))
+    .find((button) => button.textContent?.includes("今日焦点"))!;
+  await act(async () => dropCardOn(".column-done"));
+  await act(async () => focus.click());
+  expect(board.updateCalls).toBe(1);
+
+  await act(async () => {
+    first.reject(new Error("推进完成失败"));
+    await Promise.resolve();
+  });
+  await vi.waitFor(() => expect(board.updateCalls).toBe(2));
+
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].stage).toBe("idea");
+  expect(cached[0].focus).toBe(true);
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
 test("same-field stage mutations wait for the prior request to apply", async () => {
   board.cards = [card()];
   const releaseFirst = deferred<void>();
@@ -471,6 +558,125 @@ test("same-field stage mutations wait for the prior request to apply", async () 
   const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
   expect(serverCard.stage).toBe("doing");
   expect(cached[0].stage).toBe("doing");
+});
+
+test("a reorder load merges server attachments and another card while preserving a confirmed reference", async () => {
+  const firstAttachment = attachment("first", 0);
+  const secondAttachment = attachment("second", 1);
+  board.cards = [
+    card({ attachments: [firstAttachment, secondAttachment] }),
+    card({ id: 2, title: "另一张旧卡", sortOrder: 2 }),
+  ];
+  board.reorder = async () => undefined;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+
+  const delayedLoad = deferred<CardRecord[]>();
+  board.list = () => delayedLoad.promise;
+  const priorListCalls = board.listCalls;
+  const moveForward = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="向前移动"]'))
+    .find((button) => !button.disabled)!;
+  await act(async () => moveForward.click());
+  await vi.waitFor(() => expect(board.listCalls).toBe(priorListCalls + 1));
+  const reference = Array.from(container.querySelectorAll<HTMLButtonElement>(".editor-options button"))
+    .find((button) => button.textContent?.includes("参考"))!;
+  await act(async () => reference.click());
+  await vi.waitFor(() => expect(board.updateCalls).toBe(1));
+
+  await act(async () => {
+    delayedLoad.resolve([
+      card({ reference: false, attachments: [
+        { ...secondAttachment, sortOrder: 0 },
+        { ...firstAttachment, sortOrder: 1 },
+      ] }),
+      card({ id: 2, title: "另一张服务端新卡", sortOrder: 2 }),
+    ]);
+    await Promise.resolve();
+  });
+
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached.find((item) => item.id === 1)?.reference).toBe(true);
+  expect(cached.find((item) => item.id === 1)?.attachments.map((item) => item.id)).toEqual(["second", "first"]);
+  expect(cached.find((item) => item.id === 2)?.title).toBe("另一张服务端新卡");
+  expect(Array.from(container.querySelectorAll(".attachment-grid figcaption"), (item) => item.textContent)).toEqual([
+    "second.png",
+    "first.png",
+  ]);
+  expect(Array.from(container.querySelectorAll(".task-card-main h3"), (item) => item.textContent)).toContain("另一张服务端新卡");
+});
+
+test("a later local attachment deletion filters only that item from an incoming reordered list", async () => {
+  const firstAttachment = attachment("first", 0);
+  const secondAttachment = attachment("second", 1);
+  const thirdAttachment = attachment("third", 2);
+  board.cards = [card({ attachments: [firstAttachment, secondAttachment, thirdAttachment] })];
+  board.reorder = async () => undefined;
+  board.remove = async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    throw new AttachmentDeleteError("删除结果已确认，但刷新暂不可用", "hidden");
+  };
+  vi.stubGlobal("confirm", () => true);
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+
+  const delayedLoad = deferred<CardRecord[]>();
+  board.list = () => delayedLoad.promise;
+  const priorListCalls = board.listCalls;
+  const moveForward = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="向前移动"]'))
+    .find((button) => !button.disabled)!;
+  await act(async () => moveForward.click());
+  await vi.waitFor(() => expect(board.listCalls).toBe(priorListCalls + 1));
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="删除截图"]')!.click());
+
+  await act(async () => {
+    delayedLoad.resolve([card({ attachments: [
+      { ...thirdAttachment, sortOrder: 0 },
+      { ...firstAttachment, sortOrder: 1 },
+      { ...secondAttachment, sortOrder: 2 },
+    ] })]);
+    await Promise.resolve();
+  });
+
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].attachments.map((item) => item.id)).toEqual(["third", "second"]);
+  expect(Array.from(container.querySelectorAll(".attachment-grid figcaption"), (item) => item.textContent)).toEqual([
+    "third.png",
+    "second.png",
+  ]);
+});
+
+test("an upload load merges the ready attachment while preserving a concurrent confirmed reference", async () => {
+  const originalAttachment = attachment("old", 0);
+  const uploadedAttachment = attachment("uploaded", 1);
+  board.cards = [card({ attachments: [originalAttachment] })];
+  board.upload = async () => undefined;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+
+  const delayedLoad = deferred<CardRecord[]>();
+  board.list = () => delayedLoad.promise;
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, "files", {
+    configurable: true,
+    value: [new File(["png"], "uploaded.png", { type: "image/png" })],
+  });
+  await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+  const priorListCalls = board.listCalls;
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+  await vi.waitFor(() => expect(board.listCalls).toBe(priorListCalls + 1));
+  const reference = Array.from(container.querySelectorAll<HTMLButtonElement>(".editor-options button"))
+    .find((button) => button.textContent?.includes("参考"))!;
+  await act(async () => reference.click());
+  await vi.waitFor(() => expect(board.updateCalls).toBe(2));
+
+  await act(async () => {
+    delayedLoad.resolve([card({ reference: false, attachments: [originalAttachment, uploadedAttachment] })]);
+    await Promise.resolve();
+  });
+
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].reference).toBe(true);
+  expect(cached[0].attachments.map((item) => item.id)).toEqual(["old", "uploaded"]);
 });
 
 test("queued mutations preserve confirmed fields and activity remains busy until both finish", async () => {

@@ -77,6 +77,26 @@ const EDITOR_DRAFT_FIELDS = new Set<keyof CardPatch>([
   "title", "stage", "criteria", "result", "originalText", "organizedText",
   "aiAnalysis", "aiModel", "aiPromptVersion", "aiOrganizedAt",
 ]);
+const CARD_PROJECTION_FIELDS = [
+  "title", "stage", "criteria", "result", "originalText", "organizedText",
+  "aiAnalysis", "aiModel", "aiPromptVersion", "aiOrganizedAt", "originalTextUpdatedAt",
+  "focus", "archived", "reference", "sortOrder", "completedAt", "previousStage",
+  "updatedAt", "attachments",
+] as const satisfies readonly (keyof CardRecord)[];
+
+function fieldsOwnedByPatch(patch: CardPatch): Set<keyof CardRecord> {
+  const fields = new Set<keyof CardRecord>(Object.keys(patch) as (keyof CardPatch)[]);
+  fields.add("updatedAt");
+  if (patch.stage !== undefined) {
+    fields.add("completedAt");
+    fields.add("previousStage");
+    fields.add("focus");
+    fields.add("sortOrder");
+  }
+  if (patch.archived !== undefined) fields.add("focus");
+  if (patch.originalText !== undefined) fields.add("originalTextUpdatedAt");
+  return fields;
+}
 
 function nextStage(stage: Stage): Stage | null {
   const index = STAGES.indexOf(stage);
@@ -117,24 +137,46 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const cardsRef = useRef(cards);
   const mutationChainsRef = useRef(new Map<number, CardMutationChain>());
   const mutationQueuesRef = useRef(new Map<number, Promise<void>>());
-  const projectionEpochRef = useRef(0);
+  const localProjectionRevisionRef = useRef(0);
+  const localFieldRevisionsRef = useRef(new Map<number, Map<keyof CardRecord, number>>());
+  const attachmentDeletionRevisionsRef = useRef(new Map<number, Map<string, number>>());
   const loadGenerationRef = useRef(0);
   const saving = activeOperations > 0;
   const beginOperation = useCallback(() => operationCoordinator.beginOperation(), [operationCoordinator]);
 
   const commitCards = useCallback((next: CardRecord[]) => {
-    projectionEpochRef.current += 1;
     cardsRef.current = next;
     setCards(next);
     writeBoardCache(userId, next);
   }, [userId]);
 
-  const commitCard = useCallback((card: CardRecord, updateSelection = true) => {
+  const markLocalFields = useCallback((cardId: number, fields: Iterable<keyof CardRecord>) => {
+    const revision = localProjectionRevisionRef.current + 1;
+    localProjectionRevisionRef.current = revision;
+    const revisions = localFieldRevisionsRef.current.get(cardId) ?? new Map<keyof CardRecord, number>();
+    for (const field of fields) revisions.set(field, revision);
+    localFieldRevisionsRef.current.set(cardId, revisions);
+  }, []);
+
+  const markAttachmentDeleted = useCallback((cardId: number, attachmentId: string) => {
+    const revision = localProjectionRevisionRef.current + 1;
+    localProjectionRevisionRef.current = revision;
+    const revisions = attachmentDeletionRevisionsRef.current.get(cardId) ?? new Map<string, number>();
+    revisions.set(attachmentId, revision);
+    attachmentDeletionRevisionsRef.current.set(cardId, revisions);
+  }, []);
+
+  const commitCard = useCallback((
+    card: CardRecord,
+    updateSelection = true,
+    localFields: Iterable<keyof CardRecord> = CARD_PROJECTION_FIELDS,
+  ) => {
+    markLocalFields(card.id, localFields);
     commitCards(replaceBoardCard(cardsRef.current, card));
     if (updateSelection) {
       setSelected((current) => current && current !== "new" && current.id === card.id ? card : current);
     }
-  }, [commitCards]);
+  }, [commitCards, markLocalFields]);
 
   const projectMutationChain = useCallback((chain: CardMutationChain): CardRecord => {
     const operations = [...chain.operations.values()].sort((left, right) => left.version - right.version);
@@ -205,11 +247,9 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     const lifecycle = operationCoordinator.lifecycleId;
     const generation = loadGenerationRef.current + 1;
     loadGenerationRef.current = generation;
-    const projectionEpoch = projectionEpochRef.current;
+    const localRevision = localProjectionRevisionRef.current;
     const isCurrentLoad = () => operationCoordinator.isActiveLifecycle(lifecycle)
       && loadGenerationRef.current === generation;
-    const isFreshSnapshot = () => isCurrentLoad()
-      && projectionEpochRef.current === projectionEpoch;
     if (!navigator.onLine) {
       const cached = readBoardCache(userId);
       if (cached.length) commitCards(cached);
@@ -227,18 +267,47 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         console.warn("未完成的截图操作暂未恢复，将在下次同步重试。", reason);
       }
       const data = await withTimeout(listBoardCards(), LOAD_TIMEOUT, "同步超时，请检查网络后重试");
-      if (!isFreshSnapshot()) return cardsRef.current;
+      if (!isCurrentLoad()) return cardsRef.current;
+      const currentById = new Map(cardsRef.current.map((card) => [card.id, card]));
+      const changedAfterLoad = (cardId: number, field?: keyof CardRecord) => {
+        const revisions = localFieldRevisionsRef.current.get(cardId);
+        if (field) return (revisions?.get(field) ?? 0) > localRevision;
+        return [...(revisions?.values() ?? [])].some((revision) => revision > localRevision);
+      };
+      const mergeLocalChanges = (serverCard: CardRecord): CardRecord => {
+        const current = currentById.get(serverCard.id);
+        if (!current) return serverCard;
+        const merged = { ...serverCard };
+        for (const field of CARD_PROJECTION_FIELDS) {
+          if (changedAfterLoad(serverCard.id, field)) {
+            Object.assign(merged, { [field]: current[field] });
+          }
+        }
+        const deletedAttachments = attachmentDeletionRevisionsRef.current.get(serverCard.id);
+        merged.attachments = merged.attachments.filter((attachment) => (
+          (deletedAttachments?.get(attachment.id) ?? 0) <= localRevision
+        ));
+        return merged;
+      };
       const serverIds = new Set(data.map((card) => card.id));
       const next = data.map((card) => {
+        const merged = mergeLocalChanges(card);
         const chain = mutationChainsRef.current.get(card.id);
-        if (!chain?.operations.size) return card;
+        if (!chain?.operations.size) return merged;
         // A pending card mutation owns only its patch fields. Attachments and
         // unrelated fields continue to come from the latest server projection.
-        chain.base = { ...card, mutationVersion: undefined, pendingConfirmation: false };
+        chain.base = { ...merged, mutationVersion: undefined, pendingConfirmation: false };
         return projectMutationChain(chain);
       });
       for (const [cardId, chain] of mutationChainsRef.current) {
         if (!serverIds.has(cardId) && chain.operations.size) next.push(projectMutationChain(chain));
+      }
+      for (const current of currentById.values()) {
+        if (!serverIds.has(current.id)
+          && !mutationChainsRef.current.get(current.id)?.operations.size
+          && changedAfterLoad(current.id)) {
+          next.push(current);
+        }
       }
       commitCards(next);
       setSelected((current) => {
@@ -260,7 +329,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       setSyncState(next.some((card) => card.pendingConfirmation) ? "checking" : "synced");
       return next;
     } catch (reason) {
-      if (!isFreshSnapshot()) return cardsRef.current;
+      if (!isCurrentLoad()) return cardsRef.current;
       const message = reason instanceof Error ? reason.message : "加载失败";
       const cached = readBoardCache(userId);
       if (cached.length) commitCards(cached);
@@ -276,10 +345,14 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     const lifecycle = operationCoordinator.activate();
     const mutationChains = mutationChainsRef.current;
     const mutationQueues = mutationQueuesRef.current;
+    const localFieldRevisions = localFieldRevisionsRef.current;
+    const attachmentDeletionRevisions = attachmentDeletionRevisionsRef.current;
     return () => {
       operationCoordinator.dispose(lifecycle);
       mutationChains.clear();
       mutationQueues.clear();
+      localFieldRevisions.clear();
+      attachmentDeletionRevisions.clear();
     };
   }, [operationCoordinator]);
   useEffect(() => {
@@ -348,25 +421,30 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       pendingConfirmation: false,
     });
     const optimistic = projectMutationChain(chain);
+    const localFields = fieldsOwnedByPatch(effectivePatch);
     // Keep the editor's original card prop until the server confirms the write.
     // This prevents its local draft from being cleared during an in-flight save.
-    commitCard(optimistic, false);
+    commitCard(optimistic, false, localFields);
     const finishOperation = beginOperation();
     let finishesInBackground = false;
+    let releaseQueue: (() => void) | undefined;
     setSyncState(navigator.onLine ? "syncing" : "offline");
     try {
       if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再保存");
       // Mutation versions are meaningful only when the database sees the same
       // order. Keep optimistic rendering concurrent, but serialize delivery per card.
       const previous = mutationQueuesRef.current.get(id) ?? Promise.resolve();
+      const queueTail = new Promise<void>((resolve) => { releaseQueue = resolve; });
+      mutationQueuesRef.current.set(id, queueTail);
       const completion = previous.then(() => {
         if (!operationCoordinator.isActiveLifecycle(lifecycle)) {
           throw new Error("保存已因页面切换取消");
         }
-        return updateBoardCard(id, effectivePatch, before);
+        const knownCard = mutationChainsRef.current.get(id)?.base
+          ?? cardsRef.current.find((card) => card.id === id);
+        if (!knownCard) throw new Error("记录不存在，请刷新后重试");
+        return updateBoardCard(id, effectivePatch, knownCard);
       });
-      const queueTail = completion.then(() => undefined, () => undefined);
-      mutationQueuesRef.current.set(id, queueTail);
       void queueTail.then(() => {
         if (mutationQueuesRef.current.get(id) === queueTail) mutationQueuesRef.current.delete(id);
       });
@@ -377,7 +455,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         const pendingChain = mutationChainsRef.current.get(id);
         const pendingCard = pendingChain ? projectMutationChain(pendingChain) : optimistic;
         if (operationCoordinator.isActiveLifecycle(lifecycle) && pendingOperation) {
-          commitCard(pendingCard, false);
+          commitCard(pendingCard, false, localFields);
           setError("保存结果待核对，内容和本机草稿已保留；不会自动重复提交。");
           setSyncState("checking");
         }
@@ -386,7 +464,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
           if (!operationCoordinator.isActiveLifecycle(lifecycle)) return;
           const settled = settleCardMutation(id, mutationVersion, { state: "confirmed", card });
           if (!settled) return;
-          commitCard(settled.card, settled.remaining.length === 0);
+          commitCard(settled.card, settled.remaining.length === 0, localFields);
           if (clearDraftOnConfirm) clearCardDraft(userId, id);
           if (!settled.remaining.length) setError("");
           setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
@@ -399,12 +477,15 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
           if (!operationCoordinator.isActiveLifecycle(lifecycle)) return;
           const settled = settleCardMutation(id, mutationVersion, { state: "failed" });
           if (!settled) return;
-          commitCard(settled.card, settled.remaining.length === 0);
+          commitCard(settled.card, settled.remaining.length === 0, localFields);
           setError(reason instanceof Error ? reason.message : "保存失败");
           setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
             ? "checking"
             : settled.remaining.length ? "syncing" : navigator.onLine ? "error" : "offline");
-        }).finally(finishOperation);
+        }).finally(() => {
+          releaseQueue?.();
+          finishOperation();
+        });
         return { card: pendingCard, state: "pending" };
       }
       const lifecycleActive = operationCoordinator.isActiveLifecycle(lifecycle);
@@ -412,7 +493,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         ? settleCardMutation(id, mutationVersion, { state: "confirmed", card: initial.value })
         : null;
       if (settled) {
-        commitCard(settled.card, settled.remaining.length === 0);
+        commitCard(settled.card, settled.remaining.length === 0, localFields);
         if (clearDraftOnConfirm) clearCardDraft(userId, id);
         if (!settled.remaining.length) setError("");
         setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
@@ -431,7 +512,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         ? settleCardMutation(id, mutationVersion, { state: "failed" })
         : null;
       if (settled) {
-        commitCard(settled.card, settled.remaining.length === 0);
+        commitCard(settled.card, settled.remaining.length === 0, localFields);
         setError(reason instanceof Error ? reason.message : "保存失败");
         setSyncState(settled.remaining.some((operation) => operation.pendingConfirmation)
           ? "checking"
@@ -439,7 +520,10 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       }
       throw reason;
     } finally {
-      if (!finishesInBackground) finishOperation();
+      if (!finishesInBackground) {
+        releaseQueue?.();
+        finishOperation();
+      }
     }
   }, [beginOperation, commitCard, operationCoordinator, projectMutationChain, settleCardMutation, userId]);
 
@@ -528,6 +612,9 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       ...card,
       attachments: card.attachments.filter((item) => item.id !== attachmentId),
     });
+    for (const card of cardsRef.current) {
+      if (card.attachments.some((item) => item.id === attachmentId)) markAttachmentDeleted(card.id, attachmentId);
+    }
     commitCards(cardsRef.current.map(hide));
     setSelected((current) => current && current !== "new" ? hide(current) : current);
     setViewer((current) => {
@@ -535,7 +622,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       const attachments = current.attachments.filter((item) => item.id !== attachmentId);
       return attachments.length ? { attachments, index: Math.min(current.index, attachments.length - 1) } : null;
     });
-  }, [commitCards]);
+  }, [commitCards, markAttachmentDeleted]);
 
   const removeAttachment = useCallback(async (attachment: AttachmentRecord) => {
     const finishOperation = beginOperation();
