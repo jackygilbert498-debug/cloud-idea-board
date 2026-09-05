@@ -73,6 +73,10 @@ type SelectedCard = CardRecord | "new" | null;
 type UndoAction = { cardId: number; title: string; stage: Exclude<Stage, "done"> };
 type CardMutation = { version: number; patch: CardPatch; pendingConfirmation: boolean };
 type CardMutationChain = { base: CardRecord; operations: Map<number, CardMutation> };
+const EDITOR_DRAFT_FIELDS = new Set<keyof CardPatch>([
+  "title", "stage", "criteria", "result", "originalText", "organizedText",
+  "aiAnalysis", "aiModel", "aiPromptVersion", "aiOrganizedAt",
+]);
 
 function nextStage(stage: Stage): Stage | null {
   const index = STAGES.indexOf(stage);
@@ -112,10 +116,14 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const cardsRef = useRef(cards);
   const mutationChainsRef = useRef(new Map<number, CardMutationChain>());
+  const mutationQueuesRef = useRef(new Map<number, Promise<void>>());
+  const projectionEpochRef = useRef(0);
+  const loadGenerationRef = useRef(0);
   const saving = activeOperations > 0;
   const beginOperation = useCallback(() => operationCoordinator.beginOperation(), [operationCoordinator]);
 
   const commitCards = useCallback((next: CardRecord[]) => {
+    projectionEpochRef.current += 1;
     cardsRef.current = next;
     setCards(next);
     writeBoardCache(userId, next);
@@ -194,6 +202,14 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   }, [projectMutationChain]);
 
   const load = useCallback(async () => {
+    const lifecycle = operationCoordinator.lifecycleId;
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    const projectionEpoch = projectionEpochRef.current;
+    const isCurrentLoad = () => operationCoordinator.isActiveLifecycle(lifecycle)
+      && loadGenerationRef.current === generation;
+    const isFreshSnapshot = () => isCurrentLoad()
+      && projectionEpochRef.current === projectionEpoch;
     if (!navigator.onLine) {
       const cached = readBoardCache(userId);
       if (cached.length) commitCards(cached);
@@ -211,6 +227,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         console.warn("未完成的截图操作暂未恢复，将在下次同步重试。", reason);
       }
       const data = await withTimeout(listBoardCards(), LOAD_TIMEOUT, "同步超时，请检查网络后重试");
+      if (!isFreshSnapshot()) return cardsRef.current;
       const serverIds = new Set(data.map((card) => card.id));
       const next = data.map((card) => {
         const chain = mutationChainsRef.current.get(card.id);
@@ -228,19 +245,22 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         if (!current || current === "new") return current;
         const nextCard = next.find((card) => card.id === current.id);
         if (!nextCard) return null;
-        if (!mutationChainsRef.current.has(current.id)) return nextCard;
-        // Preserve editor draft dirtiness while still accepting server-owned attachments.
-        return {
-          ...current,
-          attachments: nextCard.attachments,
-          mutationVersion: nextCard.mutationVersion,
-          pendingConfirmation: nextCard.pendingConfirmation,
-        };
+        const chain = mutationChainsRef.current.get(current.id);
+        if (!chain) return nextCard;
+        const selectedCard = { ...nextCard };
+        const draftFields = new Set([...chain.operations.values()]
+          .flatMap((operation) => Object.keys(operation.patch) as (keyof CardPatch)[])
+          .filter((field) => EDITOR_DRAFT_FIELDS.has(field)));
+        for (const field of draftFields) {
+          Object.assign(selectedCard, { [field]: current[field] });
+        }
+        return selectedCard;
       });
       setError("");
       setSyncState(next.some((card) => card.pendingConfirmation) ? "checking" : "synced");
       return next;
     } catch (reason) {
+      if (!isFreshSnapshot()) return cardsRef.current;
       const message = reason instanceof Error ? reason.message : "加载失败";
       const cached = readBoardCache(userId);
       if (cached.length) commitCards(cached);
@@ -248,16 +268,18 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
       setSyncState(navigator.onLine ? "error" : "offline");
       return cached;
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
-  }, [commitCards, projectMutationChain, userId]);
+  }, [commitCards, operationCoordinator, projectMutationChain, userId]);
 
   useEffect(() => {
     const lifecycle = operationCoordinator.activate();
     const mutationChains = mutationChainsRef.current;
+    const mutationQueues = mutationQueuesRef.current;
     return () => {
       operationCoordinator.dispose(lifecycle);
       mutationChains.clear();
+      mutationQueues.clear();
     };
   }, [operationCoordinator]);
   useEffect(() => {
@@ -334,7 +356,20 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
     setSyncState(navigator.onLine ? "syncing" : "offline");
     try {
       if (!navigator.onLine) throw new Error("当前处于离线状态，联网后再保存");
-      const completion = updateBoardCard(id, effectivePatch, before);
+      // Mutation versions are meaningful only when the database sees the same
+      // order. Keep optimistic rendering concurrent, but serialize delivery per card.
+      const previous = mutationQueuesRef.current.get(id) ?? Promise.resolve();
+      const completion = previous.then(() => {
+        if (!operationCoordinator.isActiveLifecycle(lifecycle)) {
+          throw new Error("保存已因页面切换取消");
+        }
+        return updateBoardCard(id, effectivePatch, before);
+      });
+      const queueTail = completion.then(() => undefined, () => undefined);
+      mutationQueuesRef.current.set(id, queueTail);
+      void queueTail.then(() => {
+        if (mutationQueuesRef.current.get(id) === queueTail) mutationQueuesRef.current.delete(id);
+      });
       const initial = await waitForInitialOutcome(completion, SAVE_TIMEOUT);
       if (initial.state === "pending") {
         const pendingOperation = mutationChainsRef.current.get(id)?.operations.get(mutationVersion);
@@ -753,7 +788,18 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
         const created = await creation;
         if (!created) return;
       } else {
-        const save = await onSave(card.id, { title: cleanTitle, criteria, result, originalText, organizedText, aiAnalysis, aiModel, aiPromptVersion, aiOrganizedAt, stage: targetStage }, true);
+        const patch: CardPatch = {};
+        if (cleanTitle !== card.title) patch.title = cleanTitle;
+        if (criteria !== card.criteria) patch.criteria = criteria;
+        if (result !== card.result) patch.result = result;
+        if (originalText !== card.originalText) patch.originalText = originalText;
+        if (organizedText !== card.organizedText) patch.organizedText = organizedText;
+        if (aiAnalysis !== card.aiAnalysis) patch.aiAnalysis = aiAnalysis;
+        if (aiModel !== card.aiModel) patch.aiModel = aiModel;
+        if (aiPromptVersion !== card.aiPromptVersion) patch.aiPromptVersion = aiPromptVersion;
+        if (aiOrganizedAt !== card.aiOrganizedAt) patch.aiOrganizedAt = aiOrganizedAt;
+        if (targetStage !== card.stage) patch.stage = targetStage;
+        const save = await onSave(card.id, patch, true);
         if (save.state === "pending") return;
         if (pendingFiles.length) {
           const failed = await onUploadFiles(card.id, pendingFiles);

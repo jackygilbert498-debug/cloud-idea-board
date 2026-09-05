@@ -13,8 +13,10 @@ const auth = vi.hoisted(() => ({
 }));
 const board = vi.hoisted(() => ({
   cards: [] as CardRecord[],
+  list: null as null | (() => Promise<CardRecord[]>),
   update: null as null | ((id: number, patch: CardPatch, known?: CardRecord) => Promise<CardRecord>),
   updateCalls: 0,
+  updatePatches: [] as CardPatch[],
 }));
 // Remote boundaries are replaced; App, IdeaBoard and the local draft/cache path are real.
 vi.mock("@/lib/supabase-client", () => ({
@@ -31,10 +33,11 @@ vi.mock("@/lib/supabase-board", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/supabase-board")>();
   return {
     ...original,
-    listBoardCards: async () => board.cards,
+    listBoardCards: async () => board.list ? board.list() : board.cards,
     reconcileBoardAttachments: async () => undefined,
     updateBoardCard: async (id: number, patch: CardPatch, known?: CardRecord) => {
       board.updateCalls += 1;
+      board.updatePatches.push(patch);
       if (board.update) return board.update(id, patch, known);
       if (!known) throw new Error("missing card fixture");
       return { ...known, ...patch, updatedAt: "2026-09-06T02:00:00Z" };
@@ -55,8 +58,10 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   board.cards = [];
+  board.list = null;
   board.update = null;
   board.updateCalls = 0;
+  board.updatePatches = [];
   auth.listener = null;
   auth.session = null;
 });
@@ -124,6 +129,14 @@ async function renderOnlineBoard() {
 function changeTextarea(element: HTMLTextAreaElement, value: string) {
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(element, value);
   element.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function dropCardOn(selector: string, cardId = 1) {
+  const event = new Event("drop", { bubbles: true });
+  Object.defineProperty(event, "dataTransfer", {
+    value: { getData: () => String(cardId) },
+  });
+  container.querySelector<HTMLElement>(selector)!.dispatchEvent(event);
 }
 
 test("switching accounts does not copy the previous user's composer into the new user's draft", async () => {
@@ -306,11 +319,11 @@ test("two rejected mutations restore the last confirmed card instead of the firs
   await act(async () => optionButtons.find((button) => button.textContent?.includes("归档"))!.click());
 
   await act(async () => {
-    second.reject(new Error("归档失败"));
+    first.reject(new Error("参考失败"));
     await Promise.resolve();
   });
   await act(async () => {
-    first.reject(new Error("参考失败"));
+    second.reject(new Error("归档失败"));
     await Promise.resolve();
   });
 
@@ -349,7 +362,118 @@ test("pending reload merges only mutation fields and keeps the latest server att
   expect(cached[0].attachments.map((item) => item.id)).toEqual(["new", "old"]);
 });
 
-test("late stale results cannot overwrite a newer mutation and activity remains busy until both finish", async () => {
+test("a title-only pending patch updates server-owned editor fields without clearing the draft", async () => {
+  board.cards = [card()];
+  const completion = deferred<CardRecord>();
+  board.update = () => completion.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  await act(async () => changeTextarea(container.querySelector<HTMLTextAreaElement>(".title-field textarea")!, "仅标题待核对"));
+  vi.useFakeTimers();
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(12_001); });
+  expect(board.updatePatches).toEqual([{ title: "仅标题待核对" }]);
+
+  board.cards = [card({ reference: true, focus: true })];
+  await act(async () => container.querySelector<HTMLButtonElement>(".notice-retry")!.click());
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].title).toBe("仅标题待核对");
+  expect(cached[0].reference).toBe(true);
+  expect(cached[0].focus).toBe(true);
+  expect(container.querySelector(".editor-options")?.textContent).toContain("取消参考");
+  expect(container.querySelector(".editor-options")?.textContent).toContain("移出今日焦点");
+  expect(localStorage.getItem(draftKey("alice", 1))).not.toBeNull();
+});
+
+test("a delayed load snapshot cannot overwrite a late save confirmation", async () => {
+  board.cards = [card()];
+  const completion = deferred<CardRecord>();
+  board.update = () => completion.promise;
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  await act(async () => changeTextarea(container.querySelector<HTMLTextAreaElement>(".title-field textarea")!, "最终确认标题"));
+  vi.useFakeTimers();
+  await act(async () => container.querySelector<HTMLButtonElement>(".editor footer .primary")!.click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(12_001); });
+
+  const delayedLoad = deferred<CardRecord[]>();
+  board.list = () => delayedLoad.promise;
+  await act(async () => container.querySelector<HTMLButtonElement>(".notice-retry")!.click());
+  await act(async () => {
+    completion.resolve(card({ title: "最终确认标题", updatedAt: "2026-09-06T04:00:00Z" }));
+    await Promise.resolve();
+  });
+  expect(localStorage.getItem(draftKey("alice", 1))).toBeNull();
+
+  await act(async () => {
+    delayedLoad.resolve([card()]);
+    await Promise.resolve();
+  });
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(cached[0].title).toBe("最终确认标题");
+  expect(container.querySelector(".task-card-main h3")?.textContent).toBe("最终确认标题");
+  expect(container.querySelector(".sync-status")?.textContent).toContain("已同步");
+});
+
+test("same-card requests are applied in mutation order for different fields and a third mutation", async () => {
+  board.cards = [card()];
+  const releaseFirst = deferred<void>();
+  let serverCard = card();
+  board.update = async (_id, patch) => {
+    if (board.updateCalls === 1) await releaseFirst.promise;
+    if (patch.archived === true) throw new Error("归档未落库");
+    serverCard = { ...serverCard, ...patch, updatedAt: `2026-09-06T0${board.updateCalls}:00:00Z` };
+    return serverCard;
+  };
+  await renderOnlineBoard();
+  await act(async () => container.querySelector<HTMLButtonElement>(".task-card-main")!.click());
+  const optionButtons = Array.from(container.querySelectorAll<HTMLButtonElement>(".editor-options button"));
+  await act(async () => optionButtons.find((button) => button.textContent?.includes("参考"))!.click());
+  await act(async () => optionButtons.find((button) => button.textContent?.includes("归档"))!.click());
+  await act(async () => optionButtons.find((button) => button.textContent?.includes("焦点"))!.click());
+  expect(board.updateCalls).toBe(1);
+
+  await act(async () => {
+    releaseFirst.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(serverCard.reference).toBe(true);
+  expect(serverCard.archived).toBe(false);
+  expect(serverCard.focus).toBe(true);
+  expect(cached[0].reference).toBe(true);
+  expect(cached[0].archived).toBe(false);
+  expect(cached[0].focus).toBe(true);
+  expect(board.updateCalls).toBe(3);
+});
+
+test("same-field stage mutations wait for the prior request to apply", async () => {
+  board.cards = [card()];
+  const releaseFirst = deferred<void>();
+  let serverCard = card();
+  board.update = async (_id, patch) => {
+    if (board.updateCalls === 1) await releaseFirst.promise;
+    serverCard = { ...serverCard, ...patch, updatedAt: `2026-09-06T0${board.updateCalls}:00:00Z` };
+    return serverCard;
+  };
+  await renderOnlineBoard();
+  await act(async () => dropCardOn(".column-todo"));
+  await act(async () => dropCardOn(".column-doing"));
+  expect(board.updateCalls).toBe(1);
+
+  await act(async () => {
+    releaseFirst.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
+  expect(serverCard.stage).toBe("doing");
+  expect(cached[0].stage).toBe("doing");
+});
+
+test("queued mutations preserve confirmed fields and activity remains busy until both finish", async () => {
   board.cards = [card()];
   const first = deferred<CardRecord>();
   const second = deferred<CardRecord>();
@@ -364,17 +488,17 @@ test("late stale results cannot overwrite a newer mutation and activity remains 
   expect(save.disabled).toBe(true);
 
   await act(async () => {
-    second.resolve(card({ archived: true }));
+    first.resolve(card({ reference: true }));
     await Promise.resolve();
   });
   expect(save.disabled).toBe(true);
 
   await act(async () => {
-    first.resolve(card({ reference: true }));
+    second.resolve(card({ archived: true }));
     await Promise.resolve();
   });
   expect(save.disabled).toBe(false);
   const cached = JSON.parse(localStorage.getItem(boardCacheKey("alice"))!) as CardRecord[];
   expect(cached[0].archived).toBe(true);
-  expect(cached[0].reference).toBe(false);
+  expect(cached[0].reference).toBe(true);
 });
