@@ -59,6 +59,14 @@ function successfulDeepSeekResponse(): Response {
   });
 }
 
+function responseWithJsonFailure(reason: unknown): Response {
+  const response = new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+  Object.defineProperty(response, "json", {
+    value: async () => { throw reason; },
+  });
+  return response;
+}
+
 function jsonBodyWithUtf8Size(size: number): string {
   const prefix = '{"originalText":"边界","padding":"';
   const suffix = '"}';
@@ -127,6 +135,7 @@ test("rejects missing, understated, or invalid content lengths by actual UTF-8 b
   const cases: Array<{ name: string; body: string; headers: HeadersInit; status: number; code: string }> = [
     { name: "missing length", body: jsonBodyWithUtf8Size(100_001), headers: {}, status: 413, code: "PAYLOAD_TOO_LARGE" },
     { name: "understated length", body: jsonBodyWithUtf8Size(100_001), headers: { "Content-Length": "10" }, status: 413, code: "PAYLOAD_TOO_LARGE" },
+    { name: "invalid length with an oversized body", body: jsonBodyWithUtf8Size(120_019), headers: { "Content-Length": "not-a-number" }, status: 413, code: "PAYLOAD_TOO_LARGE" },
     { name: "invalid length", body: JSON.stringify({ originalText: "合法正文" }), headers: { "Content-Length": "not-a-number" }, status: 400, code: "INVALID_CONTENT_LENGTH" },
   ];
 
@@ -194,6 +203,28 @@ test("rejects unauthenticated requests before parsing the body", async () => {
 
   assert.equal(response.status, 401);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "UNAUTHENTICATED");
+});
+
+test("maps an auth response-body abort to availability without logging diagnostics", async () => {
+  const records: unknown[][] = [];
+  const logger = {
+    error: (...args: unknown[]) => records.push(args),
+    warn: (...args: unknown[]) => records.push(args),
+    info: (...args: unknown[]) => records.push(args),
+  };
+  const diagnostic = `${AUTH_TOKEN}:${SERVICE_KEY}:auth-body-aborted`;
+  const handler = createOrganizeIdeaHandler({
+    fetchImpl: (async () => responseWithJsonFailure(new DOMException(diagnostic, "AbortError"))) as typeof fetch,
+    env: BASE_ENV,
+    logger,
+  });
+
+  const response = await handler(ideaRequest());
+
+  assert.equal(response.status, 503);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "AUTH_UNAVAILABLE");
+  assert.equal((records[0][0] as { outcome: string }).outcome, "auth_unavailable");
+  assert.doesNotMatch(JSON.stringify(records), new RegExp(`${AUTH_TOKEN}|${SERVICE_KEY}|auth-body-aborted`));
 });
 
 test("rejects a missing bearer token before any external call", async () => {
@@ -267,8 +298,8 @@ test("calls auth, atomic user quota and DeepSeek in order with the supported thi
   assert.equal(response.status, 200);
   assert.deepEqual(calls, ["auth", "quota", "deepseek"]);
   assert.deepEqual(quotaBody, { p_user_id: "server-user-id", p_limit: 20 });
-  assert.equal(quotaHeaders?.get("authorization"), `Bearer ${SERVICE_KEY}`);
-  assert.notEqual(quotaHeaders?.get("authorization"), `Bearer ${AUTH_TOKEN}`);
+  assert.equal(quotaHeaders?.get("authorization"), null);
+  assert.equal(quotaHeaders?.get("apikey"), SERVICE_KEY);
   assert.equal(deepSeekBody?.model, "deepseek-v4-pro");
   assert.deepEqual(deepSeekBody?.thinking, { type: "enabled" });
   assert.equal(deepSeekBody?.reasoning_effort, "high");
@@ -280,6 +311,39 @@ test("calls auth, atomic user quota and DeepSeek in order with the supported thi
   const messages = deepSeekBody?.messages as Array<{ role: string; content: string }>;
   assert.equal(messages.at(-1)?.content, "只整理这一张卡片");
   assert.doesNotMatch(JSON.stringify(deepSeekBody), /其他卡片|server-service-key/);
+});
+
+test("keeps the user JWT on auth and sends no Bearer service key to quota", async (t) => {
+  for (const serviceKey of ["sb_secret_current-service-key", "legacy.jwt.service-key"]) {
+    await t.test(serviceKey.startsWith("sb_secret_") ? "new secret key" : "legacy JWT key", async () => {
+      let authHeaders: Headers | undefined;
+      let quotaHeaders: Headers | undefined;
+      const handler = createOrganizeIdeaHandler({
+        fetchImpl: (async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/auth/v1/user")) {
+            authHeaders = new Headers(init?.headers);
+            return Response.json({ id: "server-user-id" });
+          }
+          if (url.endsWith("/rest/v1/rpc/consume_ai_daily_quota")) {
+            quotaHeaders = new Headers(init?.headers);
+            return Response.json(1);
+          }
+          return successfulDeepSeekResponse();
+        }) as typeof fetch,
+        env: { ...BASE_ENV, SUPABASE_SERVICE_ROLE_KEY: serviceKey },
+        logger: SILENT_LOGGER,
+      });
+
+      const response = await handler(ideaRequest());
+
+      assert.equal(response.status, 200);
+      assert.equal(authHeaders?.get("apikey"), serviceKey);
+      assert.equal(authHeaders?.get("authorization"), `Bearer ${AUTH_TOKEN}`);
+      assert.equal(quotaHeaders?.get("apikey"), serviceKey);
+      assert.equal(quotaHeaders?.get("authorization"), null);
+    });
+  }
 });
 
 test("returns an account quota 429 without calling DeepSeek", async () => {
@@ -381,6 +445,42 @@ test("classifies a DeepSeek timeout without leaking its internal error", async (
   assert.equal(response.status, 504);
   assert.equal(body.error.code, "AI_TIMEOUT");
   assert.doesNotMatch(JSON.stringify(body), /socket|diagnostics/);
+});
+
+test("maps a DeepSeek response-body timeout to AI timeout without logging diagnostics", async () => {
+  const calls: string[] = [];
+  const records: unknown[][] = [];
+  const logger = {
+    error: (...args: unknown[]) => records.push(args),
+    warn: (...args: unknown[]) => records.push(args),
+    info: (...args: unknown[]) => records.push(args),
+  };
+  const diagnostic = `${DEEPSEEK_KEY}:${ORIGINAL_TEXT}:deepseek-body-timeout`;
+  const handler = createOrganizeIdeaHandler({
+    fetchImpl: (async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/v1/user")) {
+        calls.push("auth");
+        return Response.json({ id: "server-user-id" });
+      }
+      if (url.endsWith("/rest/v1/rpc/consume_ai_daily_quota")) {
+        calls.push("quota");
+        return Response.json(1);
+      }
+      calls.push("deepseek");
+      return responseWithJsonFailure(new DOMException(diagnostic, "TimeoutError"));
+    }) as typeof fetch,
+    env: BASE_ENV,
+    logger,
+  });
+
+  const response = await handler(ideaRequest());
+
+  assert.equal(response.status, 504);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "AI_TIMEOUT");
+  assert.deepEqual(calls, ["auth", "quota", "deepseek"]);
+  assert.equal((records[0][0] as { outcome: string }).outcome, "ai_timeout");
+  assert.doesNotMatch(JSON.stringify(records), new RegExp(`${DEEPSEEK_KEY}|${ORIGINAL_TEXT}|deepseek-body-timeout`));
 });
 
 test("distinguishes truncated and invalid DeepSeek JSON responses", async (t) => {

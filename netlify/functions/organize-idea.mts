@@ -136,7 +136,15 @@ async function verifyUser(
     }
     throw new ApiFailure("UNAUTHENTICATED", 401, "登录已失效，请重新登录。");
   }
-  const user = await response.json().catch(() => null) as { id?: unknown } | null;
+  let user: { id?: unknown } | null;
+  try {
+    user = await response.json() as { id?: unknown } | null;
+  } catch (reason) {
+    if (isTimeoutFailure(reason)) {
+      throw new ApiFailure("AUTH_UNAVAILABLE", 503, "暂时无法验证登录状态，请稍后重试。");
+    }
+    user = null;
+  }
   if (typeof user?.id !== "string" || !user.id) {
     throw new ApiFailure("UNAUTHENTICATED", 401, "登录已失效，请重新登录。");
   }
@@ -145,10 +153,8 @@ async function verifyUser(
 
 async function readOriginalText(request: Request): Promise<string> {
   const declaredLength = request.headers.get("content-length");
-  if (declaredLength !== null && !/^\d+$/.test(declaredLength)) {
-    throw new ApiFailure("INVALID_CONTENT_LENGTH", 400, "请求长度格式不正确。");
-  }
-  if (declaredLength !== null && BigInt(declaredLength) > BigInt(MAX_REQUEST_BODY_BYTES)) {
+  const hasInvalidDeclaredLength = declaredLength !== null && !/^\d+$/.test(declaredLength);
+  if (!hasInvalidDeclaredLength && declaredLength !== null && BigInt(declaredLength) > BigInt(MAX_REQUEST_BODY_BYTES)) {
     throw new ApiFailure("PAYLOAD_TOO_LARGE", 413, "原始想法内容过长。");
   }
   const reader = request.body?.getReader();
@@ -169,6 +175,9 @@ async function readOriginalText(request: Request): Promise<string> {
     } finally {
       reader.releaseLock();
     }
+  }
+  if (hasInvalidDeclaredLength) {
+    throw new ApiFailure("INVALID_CONTENT_LENGTH", 400, "请求长度格式不正确。");
   }
   const bytes = new Uint8Array(byteLength);
   let offset = 0;
@@ -212,7 +221,6 @@ async function consumeDailyQuota(
       method: "POST",
       headers: {
         apikey: serviceKey,
-        Authorization: `Bearer ${serviceKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ p_user_id: userId, p_limit: limit }),
@@ -295,7 +303,10 @@ async function requestOrganization(
   } | null;
   try {
     payload = await response.json() as typeof payload;
-  } catch {
+  } catch (reason) {
+    if (isTimeoutFailure(reason)) {
+      throw new ApiFailure("AI_TIMEOUT", 504, "AI 梳理超时，请稍后重试。");
+    }
     throw new ApiFailure("AI_INVALID_RESPONSE", 502, "AI 返回的梳理结果格式不正确，请重试。");
   }
   const choice = payload?.choices?.[0];

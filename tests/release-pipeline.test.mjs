@@ -302,6 +302,7 @@ test("Netlify delegates to the non-recursive release runner command", () => {
   const netlifyConfig = readFileSync(new URL("../netlify.toml", import.meta.url), "utf8");
   const workflow = readFileSync(new URL("../.github/workflows/verify.yml", import.meta.url), "utf8");
 
+  assert.equal(packageJson.scripts["test:contracts"], "node --experimental-strip-types --test tests/release-pipeline.test.mjs");
   assert.equal(packageJson.scripts["validate:release-env"], "node scripts/validate-release-env.mjs");
   assert.equal(packageJson.scripts["build:release"], "node scripts/run-release-verification.mjs --build");
   assert.equal(packageJson.scripts["verify:release"], "node scripts/run-release-verification.mjs --verify");
