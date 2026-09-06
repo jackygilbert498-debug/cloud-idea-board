@@ -221,6 +221,7 @@ async function consumeDailyQuota(
       method: "POST",
       headers: {
         apikey: serviceKey,
+        ...(!serviceKey.startsWith("sb_secret_") ? { Authorization: `Bearer ${serviceKey}` } : {}),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ p_user_id: userId, p_limit: limit }),

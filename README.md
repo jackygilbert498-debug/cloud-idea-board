@@ -16,7 +16,7 @@
 
 ## 本地开发与验证
 
-需要 Node.js 22（最低 `22.13.0`）。首次安装依赖运行 `npm.cmd ci`，日常开发运行 `npm.cmd run dev`。Vite 开发服务只提供页面；AI 接口需要 Netlify Functions 环境，服务端密钥不得进入浏览器构建。
+发布、CI 与 Netlify 构建工具链固定为 Node.js `22.23.2`。本地受支持范围为 `^22.22.2 || ^24.15.0 || >=26.0.0`，与当前直接及测试依赖的 engines 约束一致。首次安装依赖运行 `npm.cmd ci`，日常开发运行 `npm.cmd run dev`。Vite 开发服务只提供页面；AI 接口需要 Netlify Functions 环境，服务端密钥不得进入浏览器构建。
 
 本地交付前运行：
 

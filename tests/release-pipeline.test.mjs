@@ -299,15 +299,20 @@ test("release runner uses the npm CLI through Node on Windows without enabling a
 
 test("Netlify delegates to the non-recursive release runner command", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const nvmrc = readFileSync(new URL("../.nvmrc", import.meta.url), "utf8").trim();
   const netlifyConfig = readFileSync(new URL("../netlify.toml", import.meta.url), "utf8");
   const workflow = readFileSync(new URL("../.github/workflows/verify.yml", import.meta.url), "utf8");
 
+  assert.equal(nvmrc, "22.23.2");
+  assert.equal(packageJson.engines.node, "^22.22.2 || ^24.15.0 || >=26.0.0");
   assert.equal(packageJson.scripts["test:contracts"], "node --experimental-strip-types --test tests/release-pipeline.test.mjs");
   assert.equal(packageJson.scripts["validate:release-env"], "node scripts/validate-release-env.mjs");
   assert.equal(packageJson.scripts["build:release"], "node scripts/run-release-verification.mjs --build");
   assert.equal(packageJson.scripts["verify:release"], "node scripts/run-release-verification.mjs --verify");
   assert.equal(packageJson.scripts["verify:netlify"], "node scripts/run-release-verification.mjs --verify");
   assert.match(netlifyConfig, /command\s*=\s*"npm run verify:netlify"/);
+  assert.match(netlifyConfig, /NODE_VERSION\s*=\s*"22\.23\.2"/);
   assert.match(netlifyConfig, /directory\s*=\s*"generated\/functions"/);
+  assert.match(workflow, /node-version-file:\s*\.nvmrc/);
   assert.match(workflow, /VITE_BUILD_SHA:\s*\$\{\{\s*github\.sha\s*\}\}/);
 });

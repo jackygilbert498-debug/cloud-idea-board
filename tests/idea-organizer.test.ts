@@ -298,7 +298,7 @@ test("calls auth, atomic user quota and DeepSeek in order with the supported thi
   assert.equal(response.status, 200);
   assert.deepEqual(calls, ["auth", "quota", "deepseek"]);
   assert.deepEqual(quotaBody, { p_user_id: "server-user-id", p_limit: 20 });
-  assert.equal(quotaHeaders?.get("authorization"), null);
+  assert.equal(quotaHeaders?.get("authorization"), `Bearer ${SERVICE_KEY}`);
   assert.equal(quotaHeaders?.get("apikey"), SERVICE_KEY);
   assert.equal(deepSeekBody?.model, "deepseek-v4-pro");
   assert.deepEqual(deepSeekBody?.thinking, { type: "enabled" });
@@ -313,11 +313,20 @@ test("calls auth, atomic user quota and DeepSeek in order with the supported thi
   assert.doesNotMatch(JSON.stringify(deepSeekBody), /其他卡片|server-service-key/);
 });
 
-test("keeps the user JWT on auth and sends no Bearer service key to quota", async (t) => {
-  for (const serviceKey of ["sb_secret_current-service-key", "legacy.jwt.service-key"]) {
-    await t.test(serviceKey.startsWith("sb_secret_") ? "new secret key" : "legacy JWT key", async () => {
+test("uses service-key-compatible quota auth while preserving the user JWT", async (t) => {
+  const cases = [
+    { name: "new secret key", serviceKey: "sb_secret_current-service-key", quotaAuthorization: null },
+    {
+      name: "legacy JWT key",
+      serviceKey: "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.signature",
+      quotaAuthorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.signature",
+    },
+  ];
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
       let authHeaders: Headers | undefined;
       let quotaHeaders: Headers | undefined;
+      const records: unknown[][] = [];
       const handler = createOrganizeIdeaHandler({
         fetchImpl: (async (input, init) => {
           const url = String(input);
@@ -327,21 +336,29 @@ test("keeps the user JWT on auth and sends no Bearer service key to quota", asyn
           }
           if (url.endsWith("/rest/v1/rpc/consume_ai_daily_quota")) {
             quotaHeaders = new Headers(init?.headers);
+            if (quotaHeaders.get("authorization") !== fixture.quotaAuthorization) {
+              return Response.json({ message: "wrong quota auth" }, { status: 403 });
+            }
             return Response.json(1);
           }
           return successfulDeepSeekResponse();
         }) as typeof fetch,
-        env: { ...BASE_ENV, SUPABASE_SERVICE_ROLE_KEY: serviceKey },
-        logger: SILENT_LOGGER,
+        env: { ...BASE_ENV, SUPABASE_SERVICE_ROLE_KEY: fixture.serviceKey },
+        logger: {
+          error: (...args: unknown[]) => records.push(args),
+          warn: (...args: unknown[]) => records.push(args),
+          info: (...args: unknown[]) => records.push(args),
+        },
       });
 
       const response = await handler(ideaRequest());
 
       assert.equal(response.status, 200);
-      assert.equal(authHeaders?.get("apikey"), serviceKey);
+      assert.equal(authHeaders?.get("apikey"), fixture.serviceKey);
       assert.equal(authHeaders?.get("authorization"), `Bearer ${AUTH_TOKEN}`);
-      assert.equal(quotaHeaders?.get("apikey"), serviceKey);
-      assert.equal(quotaHeaders?.get("authorization"), null);
+      assert.equal(quotaHeaders?.get("apikey"), fixture.serviceKey);
+      assert.equal(quotaHeaders?.get("authorization"), fixture.quotaAuthorization);
+      assert.equal(JSON.stringify(records).includes(fixture.serviceKey), false);
     });
   }
 });

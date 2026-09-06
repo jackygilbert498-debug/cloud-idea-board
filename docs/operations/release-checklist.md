@@ -17,7 +17,7 @@
 
 - [ ] 确认候选来自公开 GitHub 仓库，记录 remote、分支、完整 SHA 和 `git status --short`。
 - [ ] 确认本地历史 `C:\Users\zfy20\Desktop\任务看板\云端部署` 未参与构建、未修改，继续只读保留。
-- [ ] 确认 Node 22（最低 22.13.0），从锁文件运行 `npm.cmd ci`；依赖安装失败不能沿用旧 `node_modules` 判 PASS。
+- [ ] 确认 `.nvmrc`、CI 与 Netlify 均使用受校验的 Node.js `22.23.2` 发布工具链，并从锁文件运行 `npm.cmd ci`；依赖安装失败不能沿用旧 `node_modules` 判 PASS。
 - [ ] 以公开、无权限测试配置运行 `npm.cmd run verify:release`，记录 lint、typecheck、unit、regression、contracts、build、artifact 的退出码和测试计数。Netlify 随后必须单独通过 `npm run verify:netlify`，不能用本地命令替代平台构建。
 - [ ] 运行 `npm.cmd audit --omit=dev --audit-level=low --registry=https://registry.npmjs.org`；任何达到阈值的生产依赖问题都阻断发布。
 - [ ] 运行 `git grep -Il -E "(sk-[A-Za-z0-9]{20,}|sb_secret_[A-Za-z0-9_-]{20,}|service_role.{0,20}[A-Za-z0-9_-]{40,})" -- . ":!package-lock.json"`；预期无文件名输出，Git exit 1 表示没有 tracked 匹配。若输出任何文件，立即停止且不得把匹配内容复制到证据。
