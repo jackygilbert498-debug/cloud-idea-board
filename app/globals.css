@@ -268,6 +268,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 
 @media (max-width: 720px) {
   body { background: #f6f8fa; }
+  /* A hard mobile accessibility floor: compact component selectors must not
+     shrink a tappable control below the 44px target. */
+  button, [role="button"] { min-width: 44px !important; min-height: 44px !important; }
+  input:not([type="radio"]):not([type="checkbox"]) { min-height: 44px; }
   .auth-shell { padding: 16px; }
   .topbar { height: 52px; padding: 0 14px; grid-template-columns: 1fr auto; }
   .brand { font-size: 12px; gap: 8px; }
@@ -280,8 +284,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .mobile-menu { display: flex; position: absolute; z-index: 40; top: 45px; right: 12px; width: 126px; padding: 6px; flex-direction: column; background: white; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 9px 25px rgba(32,42,57,.13); }
   .mobile-menu button { height: 35px; padding: 0 9px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 7px; background: transparent; font-size: 9px; color: #647082; }
   .mobile-menu button:active { background: #f3f5f8; }
-  .mobile-tabs { position: sticky; top: 52px; z-index: 25; height: 42px; padding: 0 7px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.96); backdrop-filter: blur(15px); display: grid; grid-template-columns: repeat(4, 1fr); align-items: center; }
-  .mobile-tabs button { height: 30px; padding: 0 3px; border: 0; border-radius: 7px; background: transparent; color: #7b8492; font-size: 8px; display: flex; justify-content: center; align-items: center; gap: 4px; }
+  .mobile-tabs { position: sticky; top: 52px; z-index: 25; height: 52px; padding: 0 7px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.96); backdrop-filter: blur(15px); display: grid; grid-template-columns: repeat(4, 1fr); align-items: center; }
+  .mobile-tabs button { height: 44px; padding: 0 3px; border: 0; border-radius: 7px; background: transparent; color: #7b8492; font-size: 8px; display: flex; justify-content: center; align-items: center; gap: 4px; }
   .mobile-tabs button.active { background: #f1f4f8; color: #424c5d; }
   .mobile-tabs b { color: #a0a7b2; font-size: 7px; font-weight: 500; }
   .mobile-tabs .stage-dot { width: 5px; height: 5px; }
@@ -338,11 +342,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .archive-row small { font-size: 7px; }
   .restore-button { min-width: 30px; padding: 0 7px; font-size: 0; }
   .empty-state { min-height: 290px; }
-  .mobile-composer { position: fixed; z-index: 35; bottom: max(9px, env(safe-area-inset-bottom)); left: 10px; right: 10px; height: 49px; padding: 5px; border: 1px solid #dce2ea; border-radius: 13px; background: rgba(255,255,255,.97); box-shadow: 0 10px 32px rgba(34,44,61,.15); backdrop-filter: blur(18px); display: flex; gap: 5px; }
+  .mobile-composer { position: fixed; z-index: 35; bottom: max(9px, env(safe-area-inset-bottom)); left: 10px; right: 10px; height: 54px; padding: 5px; border: 1px solid #dce2ea; border-radius: 13px; background: rgba(255,255,255,.97); box-shadow: 0 10px 32px rgba(34,44,61,.15); backdrop-filter: blur(18px); display: flex; gap: 5px; }
   .mobile-composer input { min-width: 0; flex: 1; border: 0; outline: 0; background: #f3f5f8; border-radius: 8px; padding: 0 10px; font-size: 10px; color: var(--ink); }
   .mobile-composer button { width: 38px; border: 0; border-radius: 8px; display: grid; place-items: center; color: white; background: var(--accent); }
   .mobile-composer button:disabled { background: #b8c0d2; }
-  .undo-toast { left: 10px; right: 10px; bottom: calc(max(9px, env(safe-area-inset-bottom)) + 58px); transform: none; min-height: 42px; padding-left: 10px; font-size: 9px; }
+  .undo-toast { left: 10px; right: 10px; bottom: calc(max(9px, env(safe-area-inset-bottom)) + 63px); transform: none; min-height: 44px; padding-left: 10px; font-size: 9px; }
   .undo-toast > span { min-width: 0; flex: 1; }
   .editor-backdrop { align-items: flex-end; background: rgba(26,34,47,.3); }
   .editor { height: min(92dvh, 760px); width: 100%; border-radius: 17px 17px 0 0; box-shadow: 0 -12px 38px rgba(28,37,54,.16); animation: sheet-in .2s ease-out; }
@@ -372,9 +376,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .editor > footer { min-height: 59px; padding: 9px 12px max(9px, env(safe-area-inset-bottom)); }
   .editor > footer .primary { margin-left: auto; min-width: 80px; }
   .image-viewer { grid-template-rows: 52px 1fr 50px; }
-  .image-viewer > header { padding: 0 12px; grid-template-columns: 46px 1fr 40px; }
+  .image-viewer > header { padding: 0 12px; grid-template-columns: 46px 1fr 44px; }
   .image-viewer > header strong { font-size: 9px; }
-  .image-viewer > header div { width: 34px; }
+  .image-viewer > header div { width: 44px; }
   .viewer-image-scale { width: 100vw; height: calc(100dvh - 120px); }
   .viewer-arrow { width: 35px; height: 46px; background: rgba(255,255,255,.06) !important; }
   .viewer-arrow.previous { left: 5px; }

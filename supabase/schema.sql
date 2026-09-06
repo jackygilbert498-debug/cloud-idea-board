@@ -45,6 +45,100 @@ create table if not exists public.attachments (
 
 create index if not exists attachments_owner_card_idx on public.attachments(user_id, card_id);
 
+do $$
+begin
+  if exists (
+    select 1
+    from public.attachments
+    left join public.cards on cards.id = attachments.card_id
+    where cards.id is null or attachments.user_id <> cards.user_id
+  ) then
+    raise exception 'existing attachment owner mismatch' using errcode = '23514';
+  end if;
+end;
+$$;
+
+-- Keep attachment ownership consistent with the parent card even for privileged
+-- writers that bypass RLS. This closes the gap where an owned attachment could
+-- otherwise be reassigned to another user's card.
+create or replace function public.enforce_attachment_card_owner()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare card_owner uuid;
+begin
+  select cards.user_id into card_owner
+  from public.cards
+  where cards.id = new.card_id;
+
+  if card_owner is null or card_owner <> new.user_id then
+    raise exception 'attachment owner must match card owner' using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists attachments_enforce_card_owner on public.attachments;
+create trigger attachments_enforce_card_owner
+before insert or update of card_id, user_id on public.attachments
+for each row execute function public.enforce_attachment_card_owner();
+
+-- Reordering through one function keeps the list all-or-nothing. The function
+-- rejects partial, duplicate and cross-owner lists before updating any row.
+create or replace function public.reorder_attachments(
+  p_card_id bigint,
+  p_attachment_ids uuid[]
+)
+returns void language plpgsql security invoker set search_path = '' as $$
+declare
+  existing_count integer;
+  requested_count integer;
+  distinct_count integer;
+begin
+  if auth.uid() is null or p_card_id is null or p_attachment_ids is null then
+    raise exception 'attachment list does not match card' using errcode = '42501';
+  end if;
+
+  if not exists (
+    select 1 from public.cards
+    where cards.id = p_card_id and cards.user_id = auth.uid()
+  ) then
+    raise exception 'attachment list does not match card' using errcode = '42501';
+  end if;
+
+  perform 1 from public.attachments
+  where attachments.card_id = p_card_id and attachments.user_id = auth.uid()
+  for update;
+
+  select count(*) into existing_count
+  from public.attachments
+  where attachments.card_id = p_card_id and attachments.user_id = auth.uid();
+  requested_count := cardinality(p_attachment_ids);
+  select count(distinct requested.id) into distinct_count
+  from unnest(p_attachment_ids) as requested(id);
+
+  if requested_count <> existing_count or distinct_count <> requested_count or exists (
+    select 1
+    from unnest(p_attachment_ids) as requested(id)
+    left join public.attachments on
+      attachments.id = requested.id and
+      attachments.card_id = p_card_id and
+      attachments.user_id = auth.uid()
+    where attachments.id is null
+  ) then
+    raise exception 'attachment list does not match card' using errcode = '23514';
+  end if;
+
+  update public.attachments
+  set sort_order = (requested.ordinality - 1)::integer
+  from unnest(p_attachment_ids) with ordinality as requested(id, ordinality)
+  where attachments.id = requested.id
+    and attachments.card_id = p_card_id
+    and attachments.user_id = auth.uid();
+end;
+$$;
+
+revoke all on function public.reorder_attachments(bigint, uuid[]) from public;
+grant execute on function public.reorder_attachments(bigint, uuid[]) to authenticated;
+
 create or replace function public.touch_updated_at()
 returns trigger language plpgsql security invoker set search_path = '' as $$
 begin
@@ -134,7 +228,11 @@ for insert to authenticated with check (
   )
 );
 create policy "Owners update their own attachments" on public.attachments
-for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+for update to authenticated using (user_id = auth.uid()) with check (
+  user_id = auth.uid() and exists (
+    select 1 from public.cards where cards.id = card_id and cards.user_id = auth.uid()
+  )
+);
 create policy "Owners delete their own attachments" on public.attachments
 for delete to authenticated using (user_id = auth.uid());
 

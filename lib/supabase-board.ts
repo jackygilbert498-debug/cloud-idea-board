@@ -286,21 +286,35 @@ export async function uploadBoardAttachment(cardId: number, file: File): Promise
 
 export async function reorderBoardAttachments(cardId: number, attachmentIds: string[]): Promise<void> {
   const client = requireSupabase();
-  for (const [sortOrder, id] of attachmentIds.entries()) {
-    const { error } = await client.from("attachments")
-      .update({ sort_order: sortOrder })
-      .eq("id", id)
-      .eq("card_id", cardId);
-    if (error) fail(error, "截图排序保存失败");
-  }
+  const { error } = await client.rpc("reorder_attachments", {
+    p_card_id: cardId,
+    p_attachment_ids: attachmentIds,
+  });
+  if (error) fail(error, "截图排序保存失败");
 }
 
 export async function deleteBoardAttachment(attachment: AttachmentRecord): Promise<void> {
   const client = requireSupabase();
   if (!attachment.objectKey) throw new Error("截图路径无效");
-  const { error: storageError } = await client.storage.from(SCREENSHOT_BUCKET).remove([attachment.objectKey]);
-  if (storageError) fail(storageError, "截图删除失败");
   const { error: metadataError } = await client.from("attachments").delete().eq("id", attachment.id);
   if (metadataError) fail(metadataError, "截图记录删除失败");
+
+  const { error: storageError } = await client.storage.from(SCREENSHOT_BUCKET).remove([attachment.objectKey]);
+  if (storageError) {
+    const { error: restoreError } = await client.from("attachments").insert({
+      id: attachment.id,
+      card_id: attachment.cardId,
+      object_key: attachment.objectKey,
+      filename: attachment.filename,
+      content_type: attachment.contentType,
+      size: attachment.size,
+      sort_order: attachment.sortOrder,
+      created_at: attachment.createdAt,
+    });
+    if (restoreError) {
+      throw new Error("截图文件删除失败，且截图记录恢复失败，请刷新后重试");
+    }
+    throw new Error("截图文件删除失败，截图记录已恢复");
+  }
   clearAttachmentUrlCache(attachment.objectKey);
 }

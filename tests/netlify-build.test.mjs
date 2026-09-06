@@ -5,7 +5,7 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("ships a Netlify SPA entrypoint with the memo workflow capabilities", async () => {
-  const [netlifyConfig, viteConfig, app, board, media, organizer, aiFunction, model, dataLayer, schema, migration, aiMigration] = await Promise.all([
+  const [netlifyConfig, viteConfig, app, board, media, organizer, aiFunction, model, dataLayer, schema, migration, aiMigration, ownerMigration] = await Promise.all([
     readFile(new URL("netlify.toml", root), "utf8"),
     readFile(new URL("vite.config.ts", root), "utf8"),
     readFile(new URL("src/App.tsx", root), "utf8"),
@@ -18,6 +18,7 @@ test("ships a Netlify SPA entrypoint with the memo workflow capabilities", async
     readFile(new URL("supabase/schema.sql", root), "utf8"),
     readFile(new URL("supabase/migrations/20260824_memo_flow.sql", root), "utf8"),
     readFile(new URL("supabase/migrations/20260824_restore_ai_organizer.sql", root), "utf8"),
+    readFile(new URL("supabase/migrations/20260906_attachment_owner_integrity.sql", root), "utf8"),
   ]);
   assert.match(netlifyConfig, /publish\s*=\s*"dist"/);
   assert.match(netlifyConfig, /to\s*=\s*"\/index\.html"/);
@@ -60,5 +61,12 @@ test("ships a Netlify SPA entrypoint with the memo workflow capabilities", async
   assert.match(migration, /sort_order/);
   assert.match(aiMigration, /original_text/);
   assert.match(aiMigration, /ai_analysis/);
+  assert.match(ownerMigration, /attachments_enforce_card_owner/);
+  const globalHeaders = netlifyConfig.slice(netlifyConfig.indexOf('for = "/*"'));
+  assert.match(globalHeaders, /X-Content-Type-Options\s*=\s*"nosniff"/);
+  assert.match(globalHeaders, /Referrer-Policy\s*=\s*"strict-origin-when-cross-origin"/);
+  assert.match(globalHeaders, /Content-Security-Policy\s*=/);
+  assert.match(globalHeaders, /frame-ancestors 'none'/);
+  assert.match(globalHeaders, /connect-src 'self' https:\/\/\*\.supabase\.co wss:\/\/\*\.supabase\.co/);
   await access(new URL("dist/index.html", root));
 });
