@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=22.13.0"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,15 @@
     "test:regression": "vitest run",
     "test:unit": "node scripts/test-unit.mjs",
     "test:integration": "npm run build && node --test tests/netlify-build.test.mjs",
-    "lint": "eslint src app/components lib netlify/functions tests vite.config.ts"
+    "lint": "eslint src app/components lib netlify/functions tests vite.config.ts",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test:contracts": "node --experimental-strip-types --test tests/release-pipeline.test.mjs",
+    "test:artifact": "node --test tests/netlify-build.test.mjs",
+    "validate:release-env": "node scripts/validate-release-env.mjs",
+    "verify": "npm run lint && npm run typecheck && npm run test:unit && npm run test:regression && npm run test:contracts",
+    "build:release": "node scripts/run-release-verification.mjs --build",
+    "verify:release": "node scripts/run-release-verification.mjs --verify",
+    "verify:netlify": "node scripts/run-release-verification.mjs --verify"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
@@ -25,6 +33,7 @@
     "@electric-sql/pglite": "^0.5.8",
     "@eslint/js": "9.39.4",
     "@netlify/functions": "^6.0.0",
+    "@netlify/zip-it-and-ship-it": "15.4.0",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

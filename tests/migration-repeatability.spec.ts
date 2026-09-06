@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { expect, test } from "vitest";
 
 const migration = readFileSync(new URL("../supabase/migrations/20260824_memo_flow.sql", import.meta.url), "utf8");
+const aiMigration = readFileSync(new URL("../supabase/migrations/20260824_restore_ai_organizer.sql", import.meta.url), "utf8");
 const fixture = `
   create table cards (id bigint primary key, user_id uuid, stage text, focus boolean,
     updated_at timestamptz not null);
@@ -31,5 +32,25 @@ test("migration preserves order in databases where the column already exists", a
     await db.exec("alter table attachments add column sort_order integer not null default 0; update attachments set sort_order = case id when 1 then 7 else 3 end;");
     await db.exec(migration);
     expect((await db.query("select sort_order from attachments order by id")).rows).toEqual([{ sort_order: 7 }, { sort_order: 3 }]);
+  } finally { await db.close(); }
+});
+
+test("the published AI migration can run twice without changing existing values", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(fixture);
+    await db.exec(aiMigration);
+    await db.exec(`
+      update cards
+      set original_text = '保留原始输入',
+          organized_text = '保留梳理结果',
+          ai_model = 'deepseek-v4-flash';
+    `);
+    await db.exec(aiMigration);
+    expect((await db.query("select original_text, organized_text, ai_model from cards")).rows).toEqual([{
+      original_text: "保留原始输入",
+      organized_text: "保留梳理结果",
+      ai_model: "deepseek-v4-flash",
+    }]);
   } finally { await db.close(); }
 });
