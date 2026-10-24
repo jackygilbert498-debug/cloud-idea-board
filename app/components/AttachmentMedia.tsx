@@ -2,6 +2,7 @@ import { ChevronLeft, ChevronRight, Download, LoaderCircle, Minus, Plus, Refresh
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clearAttachmentUrlCache, getBoardAttachmentUrl } from "@/lib/supabase-board";
 import type { AttachmentRecord } from "@/lib/types";
+import { useDialogFocus } from "@/lib/use-dialog-focus";
 
 export function AttachmentMedia({ attachment, className = "", eager = false }: { attachment: AttachmentRecord; className?: string; eager?: boolean }) {
   const [url, setUrl] = useState(attachment.url ?? "");
@@ -44,6 +45,7 @@ export function ImageViewer({ attachments, initialIndex, onClose }: { attachment
   const touchStartX = useRef<number | null>(null);
   const pinchStart = useRef<{ distance: number; zoom: number } | null>(null);
   const attachment = attachments[index];
+  const dialogRef = useDialogFocus<HTMLDivElement>(onClose);
   const go = useCallback((nextIndex: number) => {
     if (nextIndex < 0 || nextIndex >= attachments.length) return;
     setIndex(nextIndex);
@@ -53,13 +55,13 @@ export function ImageViewer({ attachments, initialIndex, onClose }: { attachment
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.isComposing) return;
       if (event.key === "ArrowLeft") go(index - 1);
       if (event.key === "ArrowRight") go(index + 1);
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [go, index, onClose]);
+  }, [go, index]);
 
   if (!attachment) return null;
   const download = async () => {
@@ -82,7 +84,7 @@ export function ImageViewer({ attachments, initialIndex, onClose }: { attachment
     return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
   };
 
-  return <div className="image-viewer" role="dialog" aria-modal="true" aria-label="查看截图">
+  return <div ref={dialogRef} tabIndex={-1} className="image-viewer" role="dialog" aria-modal="true" aria-label="查看截图">
     <header><span>{index + 1} / {attachments.length}</span><strong title={attachment.filename}>{attachment.filename}</strong><div><button type="button" className="viewer-download desktop-only" onClick={() => void download()} aria-label="下载截图"><Download size={17} /></button><button type="button" onClick={onClose} aria-label="关闭截图"><X size={20} /></button></div></header>
     <div className="viewer-stage"
       onTouchStart={(event) => {
