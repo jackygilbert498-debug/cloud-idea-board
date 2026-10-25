@@ -36,11 +36,20 @@ MSIX物理配置目录 `C:\Users\zfy20\AppData\Local\Packages\OpenAI.Codex_2p2nq
 - Python包含本地HTTP→子进程→完成写回完整协议测试。最新ZIP97,857字节，SHA-256 `9ebebb46774832636af7f2a652a02d0e5820479ad8e74feb6ea744f04f836dbd`，7文件逐个匹配源码；版本化安装未覆盖旧包。
 - 现场TDD修复doctor聚合退出码误判：只接受退出0/1，仍要求六项配置/ChatGPT认证正向字段；未知退出、损坏/过大JSON、API key或错误provider均拒绝。独立审查无新增问题，没有改用API计费。
 - UI修复完成设备任务残留旧“executing”摘要的问题，9个新增回归保留结果/错误、运行中进度及云端警告。
+- 独立只读审查UI增量为0 Critical/Important/Minor。最终源码提交 `323f5acf90d2e23b79b2c40bcd5da23cfb45adaa` 已推送PR #3功能分支；文档补录可以有后续提交，不影响该部署源码。
 - 生产构建会自动生成可下载 ZIP，集成测试核实 ZIP 文件头、模块清单及内容与源码相符，而不是 SPA fallback HTML。
 - 后端测试使用真实 PGlite PostgreSQL 引擎验证迁移/权限/领取/写回；PGlite 是单连接测试，不称为线上多连接并发压力验收。
 - 独立审查发现并修复云端失败后取消仍可派发、Mac 强杀遗留运行后继续领单、Unicode长度单位不一致、API/provider计费路径覆盖及最终回答脱敏边界。修复均增加行为回归。
 - Mac 遗留运行不凭 PID 盲杀；接收器保持人工处理锁，本机确认旧会话停止后才能 `recover --confirm-stopped`。
 - 脱敏是常见格式保护，不是对任意自由文本不含秘密的数学保证；不上传原始工具流/stderr，仍须避免在最终回答中主动包含敏感内容。
+
+## 最终隔离发布与在线复核
+
+部署 `6addd6be977708183598dacc` 已ready，独立API确认原site正确、context=branch-deploy、branch=codex-acceptance、published_at=null；生产仍为 `6a9d185535536d37cccd0966`，原固定Preview未覆盖。
+
+已通过真实原账号浏览器重新加载新入口 `index-_XeCpLuL.js`：D保持“执行完成”，执行结果保留，过时心跳摘要不再显示；任务B/C/A记录均保留，Windows显示在线。浏览器实际下载最新ZIP至Downloads，97857字节、SHA256与上文一致。最终Windows计划任务再次读取为Running。截图保留在本机工作附件 `codex-windows-background-accepted.png`（不含配对码或凭据，不加入Git）。
+
+部署使用已通过完整构建测试的dist（CLI --no-build），并非把参数--context误当作云端context保证；实际context以独立API及真实登录后任务列表成功为准。一次旧CLI构建尝试为Deploy canceled，不称其远端编译失败，也不替代最终ready回执。
 
 ## 外部启用门槛
 
