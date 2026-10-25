@@ -156,6 +156,20 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("credential", result.stderr.lower())
         self.assertFalse(self.output.exists())
 
+    def test_shallow_repository_is_rejected_instead_of_creating_broken_bundle(self):
+        (self.repo / "another.txt").write_bytes(b"second commit\n")
+        self.commit()
+        shallow = self.root / "shallow"
+        result = subprocess.run(["git", "clone", "-q", "--depth", "1", "--no-local",
+                                 self.repo.as_uri(), str(shallow)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.repo = shallow
+        self.assertEqual(self.git("rev-parse", "--is-shallow-repository"), "true")
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("shallow", result.stderr.lower())
+        self.assertFalse(self.output.exists())
+
     def test_extra_paths_and_extra_secrets_are_rejected(self):
         extra = self.root / "extra.txt"
         extra.write_bytes(b"ordinary evidence")

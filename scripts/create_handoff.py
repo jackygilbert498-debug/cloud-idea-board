@@ -185,6 +185,8 @@ def create(repo, output, extras):
         raise HandoffError("output must be outside source and must not already exist")
     branch = git(repo, "branch", "--show-current").decode().strip()
     commit = git(repo, "rev-parse", "HEAD").decode().strip()
+    if git(repo, "rev-parse", "--is-shallow-repository").strip() != b"false":
+        raise HandoffError("shallow repository: obtain complete authorized history before packaging")
     if not branch or git(repo, "diff", "--name-only", "HEAD", "--").strip():
         raise HandoffError("commit all tracked source changes before packaging")
     for raw in git(repo, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
@@ -233,6 +235,17 @@ def create(repo, output, extras):
         heads = git(repo, "bundle", "list-heads", str(bundle)).decode().splitlines()
         if not heads or any(line.split()[0] != commit for line in heads):
             raise HandoffError("source branch changed during packaging; retry after committing")
+        # A valid pack/manifest is not proof that all commit parents are present.
+        # Restore to an empty bare repository before publishing, without hooks,
+        # checkout filters or reliance on the source object's local availability.
+        empty_template = staging / "empty-template"
+        empty_template.mkdir()
+        restored = staging / "bundle-check.git"
+        git(repo, "-c", f"core.hooksPath={empty_template}", "clone", "--bare", "--quiet",
+            f"--template={empty_template}", str(bundle), str(restored))
+        if git(restored, "rev-parse", f"refs/heads/{branch}").decode().strip() != commit:
+            raise HandoffError("bundle restore commit mismatch")
+        git(restored, "fsck", "--full", "--no-dangling")
         add(ROOT + "repository.bundle", bundle.read_bytes())
         manifest = {"format": 1, "source_commit": commit, "branch": branch,
                     "created_at": datetime.now(timezone.utc).isoformat(),
