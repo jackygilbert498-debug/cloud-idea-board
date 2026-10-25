@@ -430,6 +430,56 @@ class PlanPolicyTests(unittest.TestCase):
         self.codex_home.mkdir()
         self.environment = {"CODEX_HOME": str(self.codex_home), "PATH": "local-path", "PROGRAMDATA": str(self.base / "programdata")}
 
+    def _chatgpt_doctor_report(self):
+        """Sanitized shape of a healthy identity in an unhealthy aggregate report."""
+        return {"checks": {
+            "config.load": {"status": "ok", "details": {"model provider": "openai"}},
+            "auth.credentials": {"status": "ok", "details": {
+                "stored auth mode": "chatgpt", "stored API key": "false", "stored ChatGPT tokens": "true"}},
+            "network.provider_reachability": {"status": "fail", "details": {}},
+            "git.environment": {"status": "warning", "details": {}},
+            "mcp.config": {"status": "warning", "details": {}},
+        }}
+
+    def test_doctor_exit_one_allows_unrelated_health_failures(self):
+        login = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"Logged in using ChatGPT")
+        doctor = subprocess.CompletedProcess([], 1, stdout=json.dumps(self._chatgpt_doctor_report()).encode(), stderr=b"")
+        with patch.object(self.policy.subprocess, "run", side_effect=[login, doctor]):
+            try:
+                self.policy.ensure_plan_login(Path(sys.executable), self.project, environment=self.environment)
+            except core.ReceiverError as error:
+                self.fail(f"Verified ChatGPT identity was rejected because unrelated doctor checks failed: {error}")
+
+    def test_doctor_exit_one_still_requires_every_positive_identity_field(self):
+        mutations = [
+            ("config.load", "status", "fail"),
+            ("config.load", "model provider", "custom"),
+            ("auth.credentials", "status", "fail"),
+            ("auth.credentials", "stored auth mode", "api"),
+            ("auth.credentials", "stored API key", "true"),
+            ("auth.credentials", "stored ChatGPT tokens", "false"),
+        ]
+        for check, field, value in mutations:
+            with self.subTest(check=check, field=field):
+                report = self._chatgpt_doctor_report()
+                target = report["checks"][check] if field == "status" else report["checks"][check]["details"]
+                target[field] = value
+                login = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"Logged in using ChatGPT")
+                doctor = subprocess.CompletedProcess([], 1, stdout=json.dumps(report).encode(), stderr=b"")
+                with patch.object(self.policy.subprocess, "run", side_effect=[login, doctor]), self.assertRaises(core.ReceiverError):
+                    self.policy.ensure_plan_login(Path(sys.executable), self.project, environment=self.environment)
+
+    def test_unknown_doctor_exit_or_unreadable_report_is_refused(self):
+        valid = json.dumps(self._chatgpt_doctor_report()).encode()
+        cases = [(2, valid), (7, valid), (-9, valid), (None, valid),
+                 (1, b"{invalid-json"), (1, valid + b" " * 262145)]
+        for returncode, output in cases:
+            with self.subTest(returncode=returncode, output_bytes=len(output)):
+                login = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"Logged in using ChatGPT")
+                doctor = subprocess.CompletedProcess([], returncode, stdout=output, stderr=b"")
+                with patch.object(self.policy.subprocess, "run", side_effect=[login, doctor]), self.assertRaises(core.ReceiverError):
+                    self.policy.ensure_plan_login(Path(sys.executable), self.project, environment=self.environment)
+
     def test_api_environment_is_removed_and_chatgpt_provider_is_fixed(self):
         env = self.policy.plan_environment({**self.environment, "OPENAI_API_KEY": "example-key", "OPENAI_BASE_URL": "https://example.invalid", "OPENAI_IDENTITY_TOKEN_FILE": "example-token-file", "CODEX_API_KEY": "example-key"})
         self.assertEqual(env, self.environment)

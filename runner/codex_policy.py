@@ -87,7 +87,10 @@ def ensure_plan_login(binary: Path, project: Path, *, environment: dict | None =
         if login.returncode or not re.search(r"(?im)^Logged in using ChatGPT\b", status):
             raise ReceiverError("A verified ChatGPT login is required. API-key, workload-identity, and unknown login modes are refused.")
         report = subprocess.run([str(binary), "doctor", "--json", *PLAN_OVERRIDES], **options)
-        if report.returncode or len(report.stdout) > 262144:
+        # Doctor aggregates unrelated network/git/MCP health checks: exit 1 may
+        # still carry a valid identity report. Require every positive auth and
+        # provider field below; reject unknown exits and unreadable reports.
+        if report.returncode not in (0, 1) or len(report.stdout) > 262144:
             raise ReceiverError("Codex could not verify its effective ChatGPT configuration.")
         checks = json.loads(report.stdout).get("checks", {})
         config = checks.get("config.load", {})

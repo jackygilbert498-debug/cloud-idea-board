@@ -18,6 +18,8 @@ codex login status
 
 ## Windows
 
+官方 `codex doctor` 汇总了身份、配置、网络、终端等多项检查。接收器分别核对明确的 ChatGPT 身份和官方 provider 字段，不把无关健康探针的失败误当成身份失效；身份/配置字段不明确、API登录、自定义计费路径、未知诊断格式或异常退出仍拒绝执行。
+
 在 PowerShell 切换到解压后的 `codex-receiver` 目录。从网页 Codex 任务页生成一次性配对码，然后将示例域名、配对码、项目目录替换为真实值：
 
 ```powershell
@@ -27,6 +29,8 @@ python runner/receiver.py run
 ```
 
 多项目可重复 `--project "ID=C:\绝对目录"`。CLI 不在 PATH 时，配对时增加 `--codex "C:\完整路径\codex.exe"`；不支持 `.cmd`、`.bat` 或 PowerShell 包装脚本。默认私人配置在 `%LOCALAPPDATA%\CloudIdeaBoard`，通过当前用户 SID 的 ACL 保护。
+
+若从 MSIX 版桌面应用内安装，Windows 可能将逻辑 `%LOCALAPPDATA%` 映射到应用的 `LocalCache\Local`。以 `doctor` 输出的 `private state` 物理路径为准；以后从应用外运行、安装或卸载时都显式传同一 `--config` 路径。安装器自动解析物理程序/配置路径，任务名也由此路径计算，不要手写另一个目录对应的任务名。
 
 确认前台运行后按 Ctrl+C 停止，再安装当前用户登录计划任务（需要同目录 `pythonw.exe`，无需管理员）：
 
