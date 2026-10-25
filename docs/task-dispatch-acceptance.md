@@ -6,17 +6,36 @@
 
 | 路线 | 已交付 | 实际证据 | 尚未完成 |
 | --- | --- | --- | --- |
-| 手机网页 | 三端选择、项目白名单、幂等发布、记录/结果、配对及撤销 | 本地隔离 fixture 浏览器发布到指定 Windows；390/1024/1440 无横向溢出，手机输入16px，按钮至少44px | 真实手机和线上登录后的设备配对端到端 |
-| Windows | Python 接收器、私人令牌、续租/取消、进程树隔离、用户登录自启安装 | 真实本机 Codex ChatGPT 登录，指定项目只读调用成功返回 `RECEIVER_SMOKE_OK cloud-idea-board-netlify`，session `01a17002-be6b-7141-8e58-27386262367d` | 线上接收器配对和安装后台；没有代替用户安装常驻任务 |
+| 手机网页 | 三端选择、项目白名单、幂等发布、记录/结果、配对及撤销 | 真实原账号网页登录、配对、发布Windows任务并读回结果；390/1024/1440无横向溢出，手机输入16px，按钮至少44px | 未在物理手机实测，桌面窄屏不代替真机验收 |
+| Windows | 已合法配对，当前用户隐藏后台运行，登录自启已配置 | 网页任务B前台执行成功、D由计划任务后台执行成功，均有真实Codex session及持久回执；任务C排队取消后未执行 | 未实测重启/注销后恢复；网络间歇TLS失败会重试，不承诺零延迟 |
 | Mac | 同一 ZIP、LaunchAgent 描述与安装/恢复说明 | 跨平台描述、进程控制和异常恢复的自动化测试 | 用户明确暂时无法操作，真机配对/后台启动/任务执行均为 pending_external |
 | 云端 | 服务端 GitHub PR 委派、持久检查点、防重复评论、真实回执查询 | 本人 GitHub 身份创建独立 Draft PR #2，发布一次有界 `@codex` 任务 | 尚无 Codex 回复、反应或分支修改；保持关闭，不能记为可用 |
 
-云端验收 PR：[cloud-idea-board #2](https://github.com/jackygilbert498-debug/cloud-idea-board/pull/2)。截至 2026-10-25 06:25（北京时间）查询，仍只有原始委派评论，分支 HEAD 为 `8167890adf4c54591ec0568e55d03059b6c7319d`。没有重复发送触发，没有合并或部署该验收 PR。
+云端验收 PR：[cloud-idea-board #2](https://github.com/jackygilbert498-debug/cloud-idea-board/pull/2)。最新只读查询为2026-10-25 18:07:18（北京时间），仍无Codex回复，只有种子提交，分支HEAD为 `8167890adf4c54591ec0568e55d03059b6c7319d`；指定文档仍为awaiting。没有重复发送触发，没有合并或部署该验收PR。
+
+## 本轮真实 Windows 端到端验收
+
+本人原账号登录验收站并明确同意“让这台电脑接任务”后，才生成一次性配对码并在本机隐藏输入消费。设备 `e874c09a-7965-4214-912d-aecf934c4b4c`、名称“本机Windows”，仅项目board映射到本仓库。没有搬运Cookie、ChatGPT凭据或广泛GitHub凭据。
+
+| 真实任务 | 任务ID | 结果与证据 |
+| --- | --- | --- |
+| A：首次安全失败 | `e675ebf9-002f-42ea-aae0-5037c2701f0e` | needs_attention；doctor网络检查总退出1被旧守卫拒绝；无Codex会话、无项目改动。保留失败记录。 |
+| B：网页→前台→网页 | `942a3a63-e028-41f7-b280-58fcc7365faa` | succeeded；17:52:52—17:53:57；session `01a1727a-416a-73f3-b2bd-9a57dc65555d`；`BOARD_ONLINE_ACCEPTANCE_OK`、正确项目/分支、干净工作区、零改动。 |
+| C：排队取消 | `86071de1-cc94-4c9a-bb44-fc25cbf52874` | cancelled；无startedAt、actualDeviceId或session，未启动执行器。 |
+| D：网页→后台→网页 | `33f6fd4c-8516-4759-997d-36c17bd1f141` | succeeded；17:58:48—18:00:03；session `01a1727f-b8dd-75e0-b51f-fcff56e88428`；`BOARD_BACKGROUND_ACCEPTANCE_OK`、正确项目/分支、干净工作区、零改动。 |
+
+时间均为2026-10-25北京时间。B、D实际设备ID与指定Windows一致；现有Supabase任务表持久回执，不是fixture/API伪造。D完成后复核原45卡片/15附件，原内容指纹均未变。
+
+后台任务 `CloudIdeaBoard-32eea75e68cb` 为Interactive当前用户、Limited、Hidden、IgnoreNew，已启动并观察Running；Python313的pythonw父进程为调度服务svchost，没有前台接收器。无需终端窗口，但电脑须开机、不休眠、Windows用户保持登录并联网。关机/注销不会自动转交Mac或云端，固定设备任务留队等待；未进行真实重启验收。
+
+MSIX物理配置目录 `C:\Users\zfy20\AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\CloudIdeaBoard` 的ACL为受保护且仅当前用户。安装版本在同一LocalCache/Local下 `CloudIdeaBoardReceiver\releases\9ebebb467748\codex-receiver\runner`。管理/卸载须用此物理配置，勿混用旧逻辑路径哈希。令牌不进入命令行、Git或安装包。
 
 ## 自动化与独立审查
 
-- Node 单元测试14项、Vitest行为回归49项、构建集成3项通过；TypeScript 类型检查与全量 ESLint 通过。
-- Python 接收器34项测试通过，包含本地 HTTP→子进程→完成写回的完整协议测试。最终 ZIP 为93,494字节，SHA-256 `50d3a2c66a7fad5b48e5dd0e16c186850ca1980a707cf6588eea1acb7507c28e`；此哈希仅对应本轮源码。
+- 最新Node14项、Vitest58项、构建集成3项、Python37项，共112项通过；类型检查、全量ESLint及diff检查通过。
+- Python包含本地HTTP→子进程→完成写回完整协议测试。最新ZIP97,857字节，SHA-256 `9ebebb46774832636af7f2a652a02d0e5820479ad8e74feb6ea744f04f836dbd`，7文件逐个匹配源码；版本化安装未覆盖旧包。
+- 现场TDD修复doctor聚合退出码误判：只接受退出0/1，仍要求六项配置/ChatGPT认证正向字段；未知退出、损坏/过大JSON、API key或错误provider均拒绝。独立审查无新增问题，没有改用API计费。
+- UI修复完成设备任务残留旧“executing”摘要的问题，9个新增回归保留结果/错误、运行中进度及云端警告。
 - 生产构建会自动生成可下载 ZIP，集成测试核实 ZIP 文件头、模块清单及内容与源码相符，而不是 SPA fallback HTML。
 - 后端测试使用真实 PGlite PostgreSQL 引擎验证迁移/权限/领取/写回；PGlite 是单连接测试，不称为线上多连接并发压力验收。
 - 独立审查发现并修复云端失败后取消仍可派发、Mac 强杀遗留运行后继续领单、Unicode长度单位不一致、API/provider计费路径覆盖及最终回答脱敏边界。修复均增加行为回归。
@@ -25,12 +44,12 @@
 
 ## 外部启用门槛
 
-1. 新增 SQL 迁移需要项目数据库管理权限。当前未取得可用的 Supabase 管理登录，线上迁移没有执行或验证；服务端 service role 并不等于 SQL DDL 权限。本机直连探针出现 TLS/EOF，不能据此推断线上数据库已迁移或故障。
-2. Netlify 尚无 `CODEX_ALLOWED_USER_IDS` 等任务启用配置。没有配置时拒绝派发，不放开给任意登录用户。
+1. 原Supabase项目已通过本人真实SQL Editor登录完成增量事务迁移，数据指纹和权限复核通过，不重跑迁移。
+2. Netlify仅branch-deploy/deploy-preview配置本人允许名单和cloud=false；只在独立验收站通过Windows真实链路，原production与固定Preview未覆盖。
 3. 云端还需本人账号的目标仓库连接、最小权限 GitHub 运行时凭据及真实 Codex 回执。没有把本机 gh 广泛凭据或 ChatGPT 凭据复制到服务器。
 4. 安装包不包含 Python/Codex 运行时，也没有真实 Mac 登录信息。操作步骤见 [部署与配对说明](codex-task-setup.md)。
 
-以上不满足时，只能交付 implemented 的代码和安装包，不能声称三端全部上线验收完成。
+Windows已通过本轮真实在线/后台验收；云端和Mac仍有上述门槛，不能声称三端全完成。以下为历史记录，旧“未登录/迁移/配对”不代表当前状态。
 
 ## 后续自主推进：独立预览部署与线上核对
 

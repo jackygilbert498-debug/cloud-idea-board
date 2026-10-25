@@ -95,3 +95,34 @@ test.each(["needs_attention", "submitted"] as const)("a PR link alone is not ack
   expect(container.textContent).toContain(status === "needs_attention" ? "已取消" : "已停止后续派发");
   expect(container.textContent).not.toContain("正在请求停止");
 });
+
+test.each([
+  { status: "succeeded", result: "任务已完成，检查通过。", error: "" },
+  { status: "failed", result: "保留已完成的检查结果。", error: "构建检查失败。" },
+  { status: "cancelled", result: "取消前已完成文件检查。", error: "" },
+  { status: "needs_attention", result: "", error: "执行超时，请检查设备。" },
+] as const)("device $status hides stale progress while preserving its receipt", async ({ status, result, error }) => {
+  const task: CodexTask = { id: "device-1", requestId: crypto.randomUUID(), title: "设备任务", prompt: "运行项目检查", acceptance: "", targetKind: "device", deviceId: "windows-id", projectId: "local", status, actualDeviceId: "windows-id", createdAt: "2026-10-25T00:00:00Z", updatedAt: "2026-10-25T00:02:00Z", startedAt: "2026-10-25T00:00:30Z", completedAt: "2026-10-25T00:02:00Z", summary: "Codex is executing on the paired device; elapsed 65s.", result, error, sessionId: "session-1", cloudUrl: null };
+  api.list.mockResolvedValue({ ...overview, tasks: [task] });
+  await render();
+  await act(async () => container.querySelector<HTMLButtonElement>(".codex-task-toggle")!.click());
+
+  expect(container.textContent).not.toContain("Codex is executing on the paired device; elapsed 65s.");
+  if (result) expect(container.querySelector(".codex-detail pre")?.textContent).toBe(result);
+  if (error) expect(container.querySelector(".codex-task-error")?.textContent).toBe(error);
+});
+
+test.each([
+  ["device", "running", "Codex is executing on the paired device; elapsed 65s."],
+  ["device", "cancel_requested", "Codex is stopping on the paired device."],
+  ["cloud", "cancel_requested", "已停止后续派发；已运行的云端任务仍可能继续，请到云端核对。"],
+  ["cloud", "cancelled", "已取消后续派发，请保留云端回执。"],
+  ["cloud", "needs_attention", "云端接收情况需要核对。"],
+] as const)("%s %s preserves its current summary", async (targetKind, status, summary) => {
+  const task: CodexTask = { id: "task-summary", requestId: crypto.randomUUID(), title: "摘要任务", prompt: "运行项目检查", acceptance: "", targetKind, deviceId: targetKind === "device" ? "windows-id" : null, projectId: targetKind === "device" ? "local" : "board", status, actualDeviceId: targetKind === "device" ? "windows-id" : null, createdAt: "2026-10-25T00:00:00Z", updatedAt: "2026-10-25T00:02:00Z", startedAt: "2026-10-25T00:00:30Z", completedAt: null, summary, result: "", error: "", sessionId: null, cloudUrl: null };
+  api.list.mockResolvedValue({ ...overview, tasks: [task] });
+  await render();
+  await act(async () => container.querySelector<HTMLButtonElement>(".codex-task-toggle")!.click());
+
+  expect(container.querySelector(".codex-detail")?.textContent).toContain(summary);
+});

@@ -2,6 +2,18 @@
 
 Plan: docs/superpowers/plans/2026-10-25-codex-three-targets.md
 
+## Current verified state — 2026-10-25 18:07 Asia/Shanghai
+
+- Windows is genuinely paired and receiving in the background. Real owner UI task B succeeded in the foreground; task D succeeded under the hidden current-user Scheduled Task; queued task C was cancelled without starting a Codex session. IDs and operating limits are in docs/task-dispatch-acceptance.md.
+- Background task CloudIdeaBoard-32eea75e68cb is Interactive/Limited/Hidden and Running. Its pythonw process is parented by scheduler svchost, with no foreground receiver. Login autostart is configured; a real reboot/logoff cycle is not tested. Keep the computer on, awake, Windows user logged in and network connected.
+- Device bearer remains only in protected physical MSIX LocalCache config. Use that explicit physical config for management; do not re-pair, duplicate devices or reinstall the older release. Installed ZIP97857 bytes, SHA2569ebebb46774832636af7f2a652a02d0e5820479ad8e74feb6ea744f04f836dbd.
+- After D, original database counts45/15 and both content fingerprints remain unchanged. First safe failure A is retained as needs_attention, not erased or silently replayed.
+- Live acceptance exposed stale heartbeat text under a completed device task. UI-only fix hides terminal device progress while preserving result/error and active/cloud summaries;9 new regression cases pass. Fresh112 checks (Node14+Vitest58+build3+Python37), typecheck, lint and diff-check pass.
+- Isolated acceptance currently serves doctor-fix deploy6addd1268c593ce138d971a7; final UI-only update is being published next. Production6a9d185535536d37cccd0966 and fixed Preview are preserved.
+- Cloud PR#2 bounded recheck18:07:18: seed HEAD8167890adf4c54591ec0568e55d03059b6c7319d unchanged, no Codex reply, target doc awaiting. Cloud stays disabled. Mac package is ready, not real-device accepted.
+
+## Chronological log (older gates below are historical)
+
 - User confirmed all three targets; Mac currently unavailable, prepare install package first.
 - Baseline: full Emil dirty tree at 42043a7, no files removed. Windows native dependencies restored; existing Node unit14/14, regression12/12, integration2/2, typecheck and lint passed before feature work.
 - Execution: independent file ownership for backend, Python receiver and UI; root coordinates integration and a fresh final review.
