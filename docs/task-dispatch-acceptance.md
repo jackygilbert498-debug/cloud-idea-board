@@ -31,3 +31,20 @@
 4. 安装包不包含 Python/Codex 运行时，也没有真实 Mac 登录信息。操作步骤见 [部署与配对说明](codex-task-setup.md)。
 
 以上不满足时，只能交付 implemented 的代码和安装包，不能声称三端全部上线验收完成。
+
+## 后续自主推进：独立预览部署与线上核对
+
+用户随后授权休息期间继续推进，无需普通步骤逐项确认。本轮已部署到原 Netlify 站点内的独立验收别名：
+
+[Codex 验收预览](https://codex-acceptance--fy-cloud-idea-board.netlify.app/)，deploy ID `6add330919bacbc7c5f4b111`，源码提交 `04a0504`。
+
+- 线上 HTML 和 JavaScript 均200，构建包包含新 Codex 入口；浏览器显示真实登录页，390/1440宽度无横向溢出、无未捕获异常。没有使用示例 fixture 冒充线上账号。
+- 线上 `/codex-receiver.zip` 返回200、`application/zip`、93,494字节，文件头 `50-4B-03-04`，SHA-256与上文完全相同。
+- 新用户 API 未登录时401 `UNAUTHENTICATED`；接收器 API 因缺启用配置返回503 `SERVER_NOT_CONFIGURED`。这是明确未开通，不是三端在线验收通过。
+- 原有固定 Preview 与新验收站的已有 AI 接口，在使用明确无效的诊断登录令牌时均返回503 `AUTH_UNAVAILABLE`，没有调用付费 AI。只能确认当前验证链路不可用，不能据此断言 Supabase 项目暂停、密钥错误或数据库故障。
+- Netlify管理API确认生产 deploy仍为 `6a9d185535536d37cccd0966`，未覆盖生产；固定 Preview也没有替换为未开通版本。
+- 再次完整验证：Node14、Vitest49、构建集成3、Python34均通过，typecheck与ESLint通过。
+- 官方CLI的 `codex cloud list --json --limit 5` 成功返回空列表；环境选择器仅有全局筛选项，没有该仓库的可用环境ID。因此没有伪造ENV_ID或发起重复云任务。
+- Supabase集成在目录中可用但未连接；没有可用管理令牌、SQL管理会话或数据库密码，不能自主执行DDL。已准备连接入口，未声称已安装或授权。
+
+已建立本对话的有界自动跟进（每小时，最多8次）：只在真实连接/回执变化后继续安全步骤，无变化保持安静，不重复相同阻塞或触发评论。自动跟进不代替本人授权，也不代表当前网页已经能自动接单。
