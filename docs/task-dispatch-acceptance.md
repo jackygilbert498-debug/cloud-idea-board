@@ -63,3 +63,15 @@
 - Windows安装准备已完成：ZIP无覆盖解压至 `%LOCALAPPDATA%\CloudIdeaBoardReceiver`，7个文件哈希逐个匹配；Python3.13.15、原生Codex0.163及ChatGPT登录可用。仍未创建配对令牌或自启任务，不冒称线上接单已通过。
 - Netlify管理API经有界直连/现有代理检查仍遇TLS/EOF；CLI设置尝试退出0但无写入回执，读回deploy-preview白名单仍无值，不能据此开通任务服务。已打开真实GitHub `Authorize Netlify Auth` 登录确认页（仅只读邮箱权限）供本人操作，未自动同意新OAuth授权。
 - 原固定Preview登录态仍真实有效，恢复后显示44条本人记录；没有复制Cookie或用户Token去验收域名。隔离验收地址本轮在内置浏览器出现连接关闭，未声称已完成新的线上部署或认证验收。原Preview和production均未覆盖。
+
+## Netlify 配置阻塞恢复
+
+随后本人尝试登录时实际回调为 `Invalid state key`；从官方入口重新发起后提示邮箱已有账户，未执行重置密码、关联GitHub或新建账号。现有本机Netlify管理授权独立恢复可用，无需绕过网页登录保护。
+
+- 当前账户只读能力为Free、`env_var_scopes.included=false`。仅Functions的细分作用域创建被403拒绝；[官方作用域说明](https://docs.netlify.com/build/environment-variables/overview/#scopes)确认细分作用域需要Pro/Enterprise，默认值作用于全部scope。
+- 只对两项非秘密配置采用默认scope，POST返回201，独立GET验证新增本人`CODEX_ALLOWED_USER_IDS`和`CODEX_CLOUD_ENABLED=false`，context恰为branch-deploy、deploy-preview。没有production/dev/all-context值，其余8项配置摘要完全一致，无付费或凭据权限变化。
+- 只读部署元数据确认旧隔离alias属于branch-deploy，branch=codex-acceptance。CLI的`--context`仅决定构建环境，不单独决定云端Functions上下文；新部署须再读实际context并核实运行时RPC。
+- 本轮100项自动化测试、类型检查、lint和diff检查再次通过；独立验收登录页已正常打开，等待本人原看板账号登录，不跨域搬运登录令牌。
+- 新隔离部署 `6addcb63e499348be21c550e` 已ready，独立API核对context=branch-deploy、branch=codex-acceptance、published_at=null；生产仍为 `6a9d185535536d37cccd0966`，固定Preview未覆盖。
+- 真实运行时探针：匿名用户list为401 `UNAUTHENTICATED`；随机不存在的设备Bearer claim为401 `DEVICE_UNAUTHORIZED`（不再是配置缺失503）。后者证明函数启用配置、运行时服务密钥和真实数据库RPC链路可用，未知设备在任何写入前被拒绝；不等于本人登录和配对已验收。
+- 新站HTML200、入口`index-D615VfDs.js`，线上ZIP93,494字节、SHA-256与既有安装包一致。Windows真实配对/网页任务/会话回执仍等待验收站本人登录，未创建私人配置或自启任务。
