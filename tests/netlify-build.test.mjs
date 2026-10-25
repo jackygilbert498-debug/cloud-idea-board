@@ -70,3 +70,25 @@ test("ships a Netlify SPA entrypoint with the memo workflow capabilities", async
   assert.match(globalHeaders, /connect-src 'self' https:\/\/\*\.supabase\.co wss:\/\/\*\.supabase\.co/);
   await access(new URL("dist/index.html", root));
 });
+
+test("production bundle excludes the isolated design fixture", async () => {
+  const html = await readFile(new URL("dist/index.html", root), "utf8");
+  assert.match(html, /viewport-fit=cover/);
+  assert.match(html, /interactive-widget=resizes-content/);
+  assert.doesNotMatch(html, /user-scalable=no|maximum-scale=1/);
+  const script = html.match(/src="(\/assets\/[^"<>]+\.js)"/)?.[1];
+  assert.ok(script, "production entrypoint must reference its built JavaScript");
+  const bundle = await readFile(new URL(`dist${script}`, root), "utf8");
+  assert.doesNotMatch(bundle, /design-qa-isolated|ui-fixture|这是本地示例/);
+});
+
+test("production serves the current portable receiver package, not an SPA fallback", async () => {
+  const archive = await readFile(new URL("dist/codex-receiver.zip", root));
+  assert.equal(archive.readUInt32LE(0), 0x04034b50);
+  for (const file of ["receiver.py", "receiver_core.py", "codex_executor.py", "receiver_install.py"]) {
+    assert.ok(archive.includes(Buffer.from(`codex-receiver/runner/${file}`)));
+    const source = await readFile(new URL(`runner/${file}`, root));
+    assert.ok(archive.includes(source), `${file} in the downloadable ZIP must match current source`);
+  }
+  assert.ok(archive.includes(Buffer.from("codex-receiver/README.md")));
+});

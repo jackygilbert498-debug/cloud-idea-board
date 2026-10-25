@@ -1,5 +1,11 @@
 # 云端构思板
 
+本轮 Emil 界面优化基于线上 `42043a7` 版本；[验收记录与本地设计预览](tests/design-acceptance.md) 包含测试方法和边界。
+
+新增“Codex 任务”入口，支持明确选择云端、Windows 或 Mac；[部署与配对说明](docs/codex-task-setup.md) 和 [本次验收边界](docs/task-dispatch-acceptance.md) 分别记录启用步骤和实际验证状态。三端不会自动互相抢单或回退，Mac 先提供接收端安装包。
+
+继续维护或恢复项目先读 [交接说明](docs/handoff.md)：Windows已真实验收，云端和Mac仍有明确门槛；交接TAR包含源码与可恢复Git历史，不包含登录凭据。
+
 ## 本地开发
 
 需要 Node.js 22.13 或更新版本。运行 `npm ci`，按部署说明配置本机环境变量，然后运行 `npm run dev`。Windows 可使用 `npm.cmd`。

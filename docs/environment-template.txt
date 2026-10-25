@@ -1,0 +1,26 @@
+# 配置变量名参考，不含真实值；不是可直接发布的 .env。
+# 不要把服务密钥、设备token、GitHub凭据或ChatGPT登录文件提交到仓库。
+
+# 前端：Vite 构建环境。anon key 是项目公开客户端key，不是 service_role。
+VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+VITE_SUPABASE_ANON_KEY=SET_IN_ORIGINAL_BUILD_ENVIRONMENT
+
+# Netlify Functions：保留原服务端配置，不导出到前端。
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=SET_ONLY_IN_NETLIFY_SERVER_ENVIRONMENT
+
+# 原有AI整理功能：只保留原配置，不为Codex任务新增付费调用。
+DEEPSEEK_API_KEY=KEEP_ORIGINAL_NETLIFY_SERVER_VALUE_ONLY
+DEEPSEEK_MODEL=KEEP_ORIGINAL_AVAILABLE_MODEL
+
+# 仅已验证的 branch-deploy/deploy-preview，本次不修改production。
+CODEX_ALLOWED_USER_IDS=ORIGINAL_OWNER_UUID_ONLY
+CODEX_CLOUD_ENABLED=false
+
+# 以下仅真实云端验收和有限授权通过后配置；当前不启用。
+# GitHub凭据应是本人身份、仅目标仓库；不能搬运广泛gh或ChatGPT凭据。
+# CODEX_GITHUB_TOKEN=SET_ONLY_IN_NETLIFY_SERVER_ENVIRONMENT
+# CODEX_CLOUD_PROJECTS=[{"id":"board","label":"任务看板","repository":"jackygilbert498-debug/cloud-idea-board","baseBranch":"main","isPublic":true}]
+
+# 原有AI整理接口其他变量由原Netlify环境管理，见部署说明及函数源码。
+# 不因本配置模板为空而重置/覆盖已有变量，不购买服务或改用额外计费API。

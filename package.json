@@ -7,7 +7,9 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "preview:design": "vite --config tests/ui-preview.config.ts",
+    "build": "npm run package:receiver && vite build",
+    "package:receiver": "node scripts/package-receiver.mjs --output public/codex-receiver.zip",
     "preview": "vite preview",
     "test": "npm run test:unit && npm run test:regression && npm run test:integration",
     "test:regression": "vitest run",

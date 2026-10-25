@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, LoaderCircle, RefreshCw, Sparkles, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { organizeIdea } from "@/lib/idea-organizer";
 import type { IdeaAnalysis, IdeaOrganizationResult } from "@/lib/types";
 
@@ -33,6 +33,7 @@ export function IdeaOrganizer({
   const [error, setError] = useState("");
   const requestId = useRef(0);
   const mounted = useRef(true);
+  const originalId = useId();
 
   useEffect(() => () => {
     mounted.current = false;
@@ -89,20 +90,20 @@ export function IdeaOrganizer({
 
   return <section className="idea-organizer" aria-label="AI 梳理">
     <div className="original-head">
-      <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+      <button type="button" aria-expanded={expanded} aria-controls={originalId} onClick={() => setExpanded((value) => !value)}>
         <ChevronDown size={14} className={expanded ? "open" : ""} />
-        {expanded ? "收起原始想法" : "查看原始想法"}
+        原始想法
         <small>{originalText.length} 字{acceptedOrganizedText ? " · 已整理" : ""}</small>
       </button>
     </div>
-    {expanded && <label className="field original-field">
+    {expanded && <label id={originalId} className="field original-field">
       <span>原始想法</span>
       <textarea
         value={originalText}
         onChange={(event) => changeOriginal(event.target.value)}
         placeholder="把口述、碎片和还没想清楚的内容先原样记下来……"
         maxLength={20_000}
-        rows={5}
+        rows={4}
       />
     </label>}
     <div className="organizer-trigger">

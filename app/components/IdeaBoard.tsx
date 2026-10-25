@@ -26,13 +26,16 @@ import {
   Sparkles,
   Star,
   Trash2,
+  Terminal,
   Upload,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AttachmentMedia, ImageViewer } from "@/app/components/AttachmentMedia";
 import { IdeaOrganizer } from "@/app/components/IdeaOrganizer";
+import { CodexTasks } from "@/app/components/CodexTasks";
 import type { OrganizerAdoption } from "@/app/components/IdeaOrganizer";
+import { useDialogFocus } from "@/lib/use-dialog-focus";
 import { applyCardPatch, getDoneBoardSlice, groupArchiveCards, matchesCard, nextStageSortOrder, replaceBoardCard, restoreStage } from "@/lib/board-model";
 import {
   createBoardCard,
@@ -65,7 +68,7 @@ const LOAD_TIMEOUT = 15_000;
 const SAVE_TIMEOUT = 12_000;
 const UNDO_DURATION = 6_000;
 
-type View = "board" | "list" | "archive";
+type View = "board" | "list" | "archive" | "codex";
 type SelectedCard = CardRecord | "new" | null;
 type UndoAction = { cardId: number; title: string; stage: Exclude<Stage, "done"> };
 
@@ -103,6 +106,34 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const cardsRef = useRef(cards);
   const mutationVersionRef = useRef(new Map<number, number>());
+  const searchRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (mobileMenu && event.key === "Escape") {
+        setMobileMenu(false);
+        menuButtonRef.current?.focus();
+      }
+      const target = event.target;
+      const editing = target instanceof HTMLElement && (target.isContentEditable || target.matches("input, textarea, select"));
+      if (event.key === "/" && view !== "codex" && !editing && !selected && !viewer) {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !menuButtonRef.current?.contains(event.target)) setMobileMenu(false);
+    };
+    document.addEventListener("keydown", keydown);
+    if (mobileMenu) document.addEventListener("pointerdown", outside);
+    return () => {
+      document.removeEventListener("keydown", keydown);
+      document.removeEventListener("pointerdown", outside);
+    };
+  }, [mobileMenu, selected, viewer, view]);
 
   const commitCards = useCallback((next: CardRecord[]) => {
     cardsRef.current = next;
@@ -331,6 +362,7 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
   const effectiveSyncState: SyncState = syncState === "synced" && (composer.trim() || editorDraftPresent) ? "draft" : syncState;
   const sync = syncLabel(effectiveSyncState);
   const visibleDoneCount = getDoneBoardSlice(cards).cards.length;
+  const visibleCount = view === "archive" ? archiveGroups.reduce((count, group) => count + group.cards.length, 0) : view === "list" ? listCards.length : activeCards.length;
 
   return <main className="app-shell">
     <header className="topbar">
@@ -339,24 +371,37 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
         <NavButton active={view === "board"} onClick={() => setView("board")} icon={<LayoutGrid size={16} />}>看板</NavButton>
         <NavButton active={view === "list"} onClick={() => setView("list")} icon={<List size={16} />}>清单</NavButton>
         <NavButton active={view === "archive"} onClick={() => setView("archive")} icon={<Archive size={16} />}>档案库</NavButton>
+        <NavButton active={view === "codex"} onClick={() => setView("codex")} icon={<Terminal size={16} />}>Codex 任务</NavButton>
       </nav>
-      <div className={`account sync-${effectiveSyncState}`}><button type="button" className="sync-status" onClick={() => { if (effectiveSyncState === "error") void load(); }} disabled={effectiveSyncState !== "error"}>{sync.icon}{sync.label}</button><span className="avatar">{(displayName || "我").slice(0, 1)}</span><button className="signout desktop-only" onClick={onSignOut}>退出</button><button className="mobile-menu-button" onClick={() => setMobileMenu((value) => !value)} aria-label="打开导航"><Menu size={17} /></button></div>
-      {mobileMenu && <nav className="mobile-menu"><button onClick={() => { setView("board"); setMobileMenu(false); }}><LayoutGrid size={15} />看板</button><button onClick={() => { setView("list"); setMobileMenu(false); }}><List size={15} />清单</button><button onClick={() => { setView("archive"); setMobileMenu(false); }}><Archive size={15} />档案库</button><button onClick={onSignOut}>退出</button></nav>}
+      <div className={`account sync-${effectiveSyncState}`}><button type="button" className="sync-status" onClick={() => { if (effectiveSyncState === "error") void load(); }} disabled={effectiveSyncState !== "error"}>{sync.icon}{sync.label}</button><span className="avatar">{(displayName || "我").slice(0, 1)}</span><button className="signout desktop-only" onClick={onSignOut}>退出</button><button ref={menuButtonRef} className="mobile-menu-button" onClick={() => setMobileMenu((value) => !value)} aria-label="打开导航" aria-expanded={mobileMenu} aria-controls="mobile-navigation"><Menu size={17} /></button></div>
+      {mobileMenu && <nav ref={menuRef} id="mobile-navigation" className="mobile-menu" aria-label="手机导航">
+        <button aria-current={view === "board" ? "page" : undefined} onClick={() => { setView("board"); setMobileMenu(false); }}><LayoutGrid size={15} />看板</button>
+        <button aria-current={view === "list" ? "page" : undefined} onClick={() => { setView("list"); setMobileMenu(false); }}><List size={15} />清单</button>
+        <button aria-current={view === "archive" ? "page" : undefined} onClick={() => { setView("archive"); setMobileMenu(false); }}><Archive size={15} />档案库</button>
+        <button aria-current={view === "codex" ? "page" : undefined} onClick={() => { setView("codex"); setMobileMenu(false); }}><Terminal size={15} />Codex 任务</button>
+        <button onClick={onSignOut}>退出</button>
+      </nav>}
     </header>
 
     {view === "board" && <div className="mobile-tabs" role="tablist" aria-label="阶段">
-      {STAGES.map((stage) => <button type="button" role="tab" aria-selected={mobileStage === stage} className={mobileStage === stage ? "active" : ""} key={stage} onClick={() => setMobileStage(stage)}><span className={`stage-dot ${stage}`} />{STAGE_META[stage].label}<b>{stage === "done" ? visibleDoneCount : cards.filter((card) => card.stage === stage && !card.archived).length}</b></button>)}
+      {STAGES.map((stage, index) => <button type="button" role="tab" id={`stage-tab-${stage}`} aria-controls="mobile-stage-panel" aria-selected={mobileStage === stage} tabIndex={mobileStage === stage ? 0 : -1} className={mobileStage === stage ? "active" : ""} key={stage} onClick={() => setMobileStage(stage)} onKeyDown={(event) => {
+        const target = event.key === "ArrowRight" ? (index + 1) % STAGES.length : event.key === "ArrowLeft" ? (index + STAGES.length - 1) % STAGES.length : event.key === "Home" ? 0 : event.key === "End" ? STAGES.length - 1 : null;
+        if (target === null) return;
+        event.preventDefault();
+        setMobileStage(STAGES[target]);
+        document.getElementById(`stage-tab-${STAGES[target]}`)?.focus();
+      }}><span className={`stage-dot ${stage}`} />{STAGE_META[stage].label}<b>{stage === "done" ? visibleDoneCount : cards.filter((card) => card.stage === stage && !card.archived).length}</b></button>)}
     </div>}
 
-    <section className="workspace">
+    {view === "codex" ? <CodexTasks userId={userId} /> : <section className="workspace">
       <div className="heading-row"><div><p className="eyebrow">PERSONAL MEMO BOARD</p><h1>{view === "archive" ? "完成与档案" : view === "list" ? "待处理清单" : "我的构思"}</h1><p>{view === "archive" ? "完成的内容按时间自然沉淀，也可以随时恢复。" : "记录、处理、完成，再从结果里回看。"}</p></div><button className="primary desktop-only" onClick={() => setSelected("new")}><Plus size={17} />记一个构思</button></div>
       {view !== "archive" && <FocusStrip cards={focusCards} onOpen={setSelected} />}
-      <div className="toolbar"><label className="search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文字、编号或截图名称" /></label><span className="result-count">{view === "archive" ? archiveGroups.reduce((count, group) => count + group.cards.length, 0) : view === "list" ? listCards.length : activeCards.length} 条记录</span></div>
+      <div className="toolbar"><div className="search"><Search size={16} /><input ref={searchRef} aria-label="搜索记录" enterKeyHint="search" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && !event.nativeEvent.isComposing) { event.stopPropagation(); setQuery(""); } }} placeholder="搜索文字、编号或截图名称" />{query ? <button className="search-clear" aria-label="清空搜索" onClick={() => { setQuery(""); searchRef.current?.focus(); }}><X size={14} /></button> : <kbd className="search-key" aria-hidden="true">/</kbd>}</div><span className="result-count" aria-live="polite">{visibleCount} 条记录</span></div>
       {error && <div className="notice" role="alert"><CircleAlert size={16} /><span>{error}</span>{syncState === "error" && <button className="notice-retry" onClick={() => void load()}><RefreshCw size={14} />重试</button>}<button onClick={() => setError("")} aria-label="关闭"><X size={15} /></button></div>}
-      {loading ? <LoadingState /> : view === "board" ? <Board cards={activeCards} mobileStage={mobileStage} onOpen={setSelected} onMove={(card, stage) => { void mutate(card.id, { stage }).catch(() => undefined); }} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} onOpenArchive={() => setView("archive")} /> : view === "archive" ? <ArchiveView groups={archiveGroups} onOpen={setSelected} onRestore={(card) => void restore(card)} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} /> : <ListView cards={listCards} onOpen={setSelected} />}
-    </section>
+      {loading ? <LoadingState /> : query.trim() && visibleCount === 0 ? <div className="empty-state"><span><Search size={22} /></span><h2>没有找到匹配的记录</h2><p>试试其他关键词，或清空搜索查看全部。</p><button className="secondary" onClick={() => { setQuery(""); searchRef.current?.focus(); }}>清空搜索</button></div> : view === "board" ? <Board cards={activeCards} mobileStage={mobileStage} onOpen={setSelected} onMove={(card, stage) => { void mutate(card.id, { stage }).catch(() => undefined); }} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} onOpenArchive={() => setView("archive")} /> : view === "archive" ? <ArchiveView groups={archiveGroups} onOpen={setSelected} onRestore={(card) => void restore(card)} onOpenImage={(card, index) => setViewer({ attachments: card.attachments, index })} /> : <ListView cards={listCards} onOpen={setSelected} />}
+    </section>}
 
-    <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void create(composer); }}><input value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>
+    {view !== "codex" && <form className="mobile-composer" onSubmit={(event) => { event.preventDefault(); void create(composer); }}><input aria-label="记录一个新构思" enterKeyHint="send" value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="记录一个新构思…" maxLength={240} /><button disabled={saving || !composer.trim()} aria-label="添加构思"><ArrowRight size={19} /></button></form>}
     {undoAction && <div className="undo-toast" role="status"><Check size={16} /><span>“{undoAction.title}”已完成</span><button onClick={() => void undoCompletion()}><RotateCcw size={14} />撤销</button></div>}
     {selected && <Editor key={selected === "new" ? "new" : selected.id} userId={userId} card={selected === "new" ? null : selected} saving={saving} onClose={() => setSelected(null)} onCreate={create} onSave={mutate} onUploadFiles={uploadFiles} onReorder={reorderAttachments} onDeleteAttachment={removeAttachment} onViewImage={(attachments, index) => setViewer({ attachments, index })} onDraftStateChange={setEditorDraftPresent} />}
     {viewer && <ImageViewer attachments={viewer.attachments} initialIndex={viewer.index} onClose={() => setViewer(null)} />}
@@ -364,11 +409,11 @@ export function IdeaBoard({ userId, displayName, onSignOut }: { userId: string; 
 }
 
 function NavButton({ active, onClick, icon, children }: { active: boolean; onClick: () => void; icon: React.ReactNode; children: React.ReactNode }) {
-  return <button className={active ? "active" : ""} onClick={onClick}>{icon}{children}</button>;
+  return <button type="button" className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={onClick}>{icon}{children}</button>;
 }
 
 function FocusStrip({ cards, onOpen }: { cards: CardRecord[]; onOpen: (card: CardRecord) => void }) {
-  return <section className="focus-strip"><div className="focus-label"><Star size={15} fill="currentColor" /><span>今日焦点</span><small>{cards.length}/3</small></div><div className="focus-items">{cards.length ? cards.map((card) => <button key={card.id} onClick={() => onOpen(card)}><span>#{String(card.id).padStart(4, "0")}</span>{card.title}<ChevronRight size={14} /></button>) : <p>把最重要的事放在这里，今天会更清楚。</p>}</div></section>;
+  return <section className="focus-strip"><div className="focus-label"><Star size={15} /><span>今日焦点</span><small>{cards.length}/3</small></div><div className="focus-items">{cards.length ? cards.map((card) => <button key={card.id} onClick={() => onOpen(card)}><span>#{String(card.id).padStart(4, "0")}</span>{card.title}<ChevronRight size={14} /></button>) : <p>把最重要的事放在这里，今天会更清楚。</p>}</div></section>;
 }
 
 function Board({ cards, mobileStage, onOpen, onMove, onOpenImage, onOpenArchive }: { cards: CardRecord[]; mobileStage: Stage; onOpen: (card: CardRecord) => void; onMove: (card: CardRecord, stage: Stage) => void; onOpenImage: (card: CardRecord, index: number) => void; onOpenArchive: () => void }) {
@@ -377,9 +422,9 @@ function Board({ cards, mobileStage, onOpen, onMove, onOpenImage, onOpenArchive 
   return <>
     <div className="board desktop-board">{STAGES.map((stage) => {
       const stageCards = cardsForStage(stage);
-      return <section className={`column column-${stage}`} key={stage} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { const card = cards.find((item) => item.id === Number(event.dataTransfer.getData("card-id"))); if (card && card.stage !== stage) onMove(card, stage); }}><ColumnHeader stage={stage} count={stageCards.length} doneMode={doneSlice.mode} /><div className="column-body">{stageCards.map((card) => <TaskCard key={card.id} card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{stage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!stageCards.length && <div className="empty-column">暂时没有记录</div>}</div></section>;
+      return <section className={`column column-${stage}`} key={stage} onDragOver={(event) => { if (event.dataTransfer.types.includes("card-id")) { event.preventDefault(); event.currentTarget.dataset.dragOver = "true"; event.dataTransfer.dropEffect = "move"; } }} onDragLeave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) delete event.currentTarget.dataset.dragOver; }} onDrop={(event) => { event.preventDefault(); delete event.currentTarget.dataset.dragOver; const card = cards.find((item) => item.id === Number(event.dataTransfer.getData("card-id"))); if (card && card.stage !== stage) onMove(card, stage); }}><ColumnHeader stage={stage} count={stageCards.length} doneMode={doneSlice.mode} /><div className="column-body">{stageCards.map((card) => <TaskCard key={card.id} card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{stage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!stageCards.length && <div className="empty-column">暂时没有记录</div>}</div></section>;
     })}</div>
-    <section className={`mobile-board-panel column-${mobileStage}`}><ColumnHeader stage={mobileStage} count={cardsForStage(mobileStage).length} doneMode={doneSlice.mode} /><div className="mobile-card-list">{cardsForStage(mobileStage).map((card) => <TaskCard key={card.id} card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{mobileStage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!cardsForStage(mobileStage).length && <div className="empty-column">暂时没有记录</div>}</div></section>
+    <section id="mobile-stage-panel" role="tabpanel" aria-labelledby={`stage-tab-${mobileStage}`} className={`mobile-board-panel column-${mobileStage}`}><ColumnHeader stage={mobileStage} count={cardsForStage(mobileStage).length} doneMode={doneSlice.mode} /><div className="mobile-card-list">{cardsForStage(mobileStage).map((card) => <TaskCard key={card.id} card={card} onOpen={onOpen} onOpenImage={onOpenImage} />)}{mobileStage === "done" && doneSlice.hiddenCount > 0 && <CompletedOverflow count={doneSlice.hiddenCount} onOpen={onOpenArchive} />}{!cardsForStage(mobileStage).length && <div className="empty-column">暂时没有记录</div>}</div></section>
   </>;
 }
 
@@ -393,9 +438,10 @@ function CompletedOverflow({ count, onOpen }: { count: number; onOpen: () => voi
 
 function TaskCard({ card, onOpen, onOpenImage }: { card: CardRecord; onOpen: (card: CardRecord) => void; onOpenImage: (card: CardRecord, index: number) => void }) {
   const cover = card.attachments[0];
-  return <article className="task-card" draggable onDragStart={(event) => event.dataTransfer.setData("card-id", String(card.id))}>
-    <button type="button" className="task-card-main" onClick={() => onOpen(card)}><div className="card-meta"><span>#{String(card.id).padStart(4, "0")}</span><span>{shortDate(card.completedAt ?? card.updatedAt)}</span></div><h3>{card.title}</h3>{(card.organizedText || card.criteria) && <p className="card-note">{card.organizedText || card.criteria}</p>}</button>
-    {cover && <div role="button" tabIndex={0} className="card-image-button" onClick={() => onOpenImage(card, 0)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpenImage(card, 0); }} aria-label={`查看 ${cover.filename}`}><AttachmentMedia key={cover.id} attachment={cover} className="card-image" />{card.attachments.length > 1 && <span className="image-count">+{card.attachments.length - 1}</span>}</div>}
+  const note = card.organizedText || card.criteria || card.originalText;
+  return <article className="task-card" draggable onDragStart={(event) => { event.dataTransfer.setData("card-id", String(card.id)); event.dataTransfer.effectAllowed = "move"; event.currentTarget.dataset.dragging = "true"; }} onDragEnd={(event) => { delete event.currentTarget.dataset.dragging; }}>
+    <button type="button" className="task-card-main" onClick={() => onOpen(card)}><div className="card-meta"><span>#{String(card.id).padStart(4, "0")}</span><span>{shortDate(card.completedAt ?? card.updatedAt)}</span></div><h3>{card.title}</h3>{note && <p className="card-note">{note}</p>}</button>
+    {cover && <div role="button" tabIndex={0} className="card-image-button" onClick={() => onOpenImage(card, 0)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpenImage(card, 0); } }} aria-label={`查看 ${cover.filename}`}><AttachmentMedia key={cover.id} attachment={cover} className="card-image" />{card.attachments.length > 1 && <span className="image-count">+{card.attachments.length - 1}</span>}</div>}
     <footer><div>{card.focus && <span className="tag focus"><Star size={12} fill="currentColor" />焦点</span>}{card.attachments.length > 0 && <span className="tag"><ImageIcon size={12} />{card.attachments.length}</span>}</div><button type="button" className="card-more" onClick={() => onOpen(card)} aria-label="打开记录"><MoreHorizontal size={17} /></button></footer>
   </article>;
 }
@@ -453,6 +499,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
   const [attachmentError, setAttachmentError] = useState("");
   const [draggedAttachment, setDraggedAttachment] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useDialogFocus<HTMLElement>(onClose);
 
   useEffect(() => {
     const dirty = title !== (card?.title ?? "")
@@ -511,7 +558,7 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
     setAiOrganizedAt(adoption.aiOrganizedAt);
   };
   const persist = async (targetStage = stage) => {
-    if (!title.trim() && !originalText.trim()) return;
+    if (saving || (!title.trim() && !originalText.trim())) return;
     const fallbackTitle = Array.from(originalText.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "未命名想法").slice(0, 40).join("");
     const cleanTitle = title.trim() || fallbackTitle;
     const details: CardCreateDetails = { criteria, result, originalText, organizedText, aiAnalysis, aiModel, aiPromptVersion, aiOrganizedAt };
@@ -571,12 +618,12 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
   };
   const advance = nextStage(stage);
 
-  return <div className="editor-backdrop"><aside className="editor" role="dialog" aria-modal="true" aria-label={card ? "编辑记录" : "新建构思"} onPaste={pasteAttachment} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}>
-    <header><div><span className={`stage-dot ${stage}`} /><p>{card ? `#${String(card.id).padStart(4, "0")}` : "NEW IDEA"}</p></div><button onClick={onClose} aria-label="关闭"><X size={19} /></button></header>
+  return <div className="editor-backdrop"><button className="editor-dismiss" tabIndex={-1} onClick={onClose} aria-label="关闭编辑面板" /><aside ref={dialogRef} tabIndex={-1} className="editor" role="dialog" aria-modal="true" aria-label={card ? "编辑记录" : "新建构思"} onKeyDownCapture={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void persist(); } }} onPaste={pasteAttachment} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}>
+    <header><div><span className={`stage-dot ${stage}`} /><p>{card ? `${STAGE_META[stage].label} · #${String(card.id).padStart(4, "0")}` : "新构思"}</p></div><button onClick={onClose} aria-label="关闭"><X size={19} /></button></header>
     <div className="editor-scroll">
       {restoredDraft && <div className="draft-restored"><FilePenLine size={14} />已恢复上次未保存的文字</div>}
       <label className="field title-field"><span>标题</span><textarea value={title} onChange={(event) => setTitle(event.target.value)} placeholder="记下你正在想的事…" maxLength={240} rows={2} /></label>
-      <fieldset className="stage-picker"><legend>所处阶段</legend>{STAGES.map((item) => <button type="button" key={item} className={stage === item ? "active" : ""} onClick={() => setStage(item)}><span className={`stage-dot ${item}`} />{STAGE_META[item].label}</button>)}</fieldset>
+      <fieldset className="stage-picker"><legend>所处阶段</legend>{STAGES.map((item) => <button type="button" key={item} className={stage === item ? "active" : ""} aria-pressed={stage === item} onClick={() => setStage(item)}><span className={`stage-dot ${item}`} />{STAGE_META[item].label}</button>)}</fieldset>
       <IdeaOrganizer originalText={originalText} acceptedOrganizedText={organizedText} onOriginalTextChange={setOriginalText} onAdopt={adoptOrganization} />
       {organizedText && <label className="field organized-field"><span>整理稿 <small>可继续修改</small></span><textarea value={organizedText} onChange={(event) => setOrganizedText(event.target.value)} maxLength={20_000} rows={5} /></label>}
       <label className="field"><span>完成标准 <small>可选</small></span><textarea value={criteria} onChange={(event) => setCriteria(event.target.value)} placeholder="做到什么程度，就算完成？" maxLength={4000} rows={3} /></label>
@@ -586,11 +633,11 @@ function Editor({ userId, card, saving, onClose, onCreate, onSave, onUploadFiles
         {pendingFiles.length > 0 && <div className="pending-grid">{pendingFiles.map((file, index) => <PendingPreview key={`${file.name}:${file.size}:${file.lastModified}`} file={file} onRemove={() => setPendingFiles((current) => current.filter((_item, itemIndex) => itemIndex !== index))} />)}</div>}
         {!card?.attachments.length && !pendingFiles.length && <div className="no-attachment"><ImageIcon size={20} /><span>还没有参考截图</span><small className="desktop-only">可直接按 ⌘V 或拖入多张截图</small><small className="mobile-only">手机端仅查看截图</small></div>}
         {attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}
-        <input className="visually-hidden" ref={inputRef} type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
+        <input className="visually-hidden desktop-only" ref={inputRef} tabIndex={-1} type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
         <button type="button" className="upload-button desktop-only" onClick={() => inputRef.current?.click()}><Upload size={15} />粘贴、拖入或选择截图<small>⌘V / JPG / PNG / WebP</small></button>
       </section>
-      {card && <div className="editor-options">{card.stage !== "done" && !card.archived && <button onClick={() => { void onSave(card.id, { focus: !card.focus }).catch(() => undefined); }}><Star size={16} fill={card.focus ? "currentColor" : "none"} />{card.focus ? "移出今日焦点" : "设为今日焦点"}</button>}<button onClick={() => { void onSave(card.id, { reference: !card.reference }).catch(() => undefined); }}><FileText size={16} />{card.reference ? "取消参考" : "标记为参考"}</button>{(card.stage === "done" || card.archived) ? <button onClick={() => { void onSave(card.id, { stage: restoreStage(card), archived: false }).catch(() => undefined); }}><RotateCcw size={16} />恢复处理</button> : <button onClick={() => { void onSave(card.id, { archived: true }).catch(() => undefined); }}><Archive size={16} />归档</button>}</div>}
+      {card && <div className="editor-options">{card.stage !== "done" && !card.archived && <button aria-pressed={card.focus} aria-label={card.focus ? "移出今日焦点" : "设为今日焦点"} onClick={() => { void onSave(card.id, { focus: !card.focus }).catch(() => undefined); }}><Star size={16} fill={card.focus ? "currentColor" : "none"} />{card.focus ? "取消焦点" : "今日焦点"}</button>}<button aria-pressed={card.reference} onClick={() => { void onSave(card.id, { reference: !card.reference }).catch(() => undefined); }}><FileText size={16} />{card.reference ? "取消参考" : "设为参考"}</button>{(card.stage === "done" || card.archived) ? <button onClick={() => { void onSave(card.id, { stage: restoreStage(card), archived: false }).catch(() => undefined); }}><RotateCcw size={16} />恢复处理</button> : <button onClick={() => { void onSave(card.id, { archived: true }).catch(() => undefined); }}><Archive size={16} />归档</button>}</div>}
     </div>
-    <footer><button className="secondary" onClick={onClose}>关闭</button>{card && advance && <button className="advance desktop-only" onClick={() => void persist(advance)}><span>保存并推进至</span>{STAGE_META[advance].label}<ChevronRight size={15} /></button>}<button className="primary" disabled={saving || (!title.trim() && !originalText.trim())} onClick={() => void persist()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存</button></footer>
+    <footer><button className="secondary" onClick={onClose}>关闭</button>{card && advance && <button className="advance desktop-only" disabled={saving || (!title.trim() && !originalText.trim())} onClick={() => void persist(advance)}><span>保存并推进至</span>{STAGE_META[advance].label}<ChevronRight size={15} /></button>}<button className="primary" title="保存（⌘ / Ctrl + Enter）" disabled={saving || (!title.trim() && !originalText.trim())} onClick={() => void persist()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{saving ? "保存中…" : "保存"}<kbd className="save-shortcut" aria-hidden="true">↵</kbd></button></footer>
   </aside></div>;
 }

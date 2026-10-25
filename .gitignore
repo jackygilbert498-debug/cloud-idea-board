@@ -43,3 +43,9 @@ yarn-error.log*
 /.netlify/
 /.superpowers/
 *.tsbuildinfo
+
+# Reproducible receiver packages and Python interpreter caches.
+/runner/dist/
+/public/codex-receiver.zip
+__pycache__/
+*.pyc

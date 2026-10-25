@@ -18,5 +18,5 @@ test("mobile interactive controls expose 44px touch targets", () => {
     /input:not\(\[type="radio"\]\):not\(\[type="checkbox"\]\)\s*\{[^}]*min-height:\s*44px/,
   );
   assert.match(mobile, /\.mobile-tabs\s*\{[^}]*height:\s*52px/);
-  assert.match(mobile, /\.mobile-composer\s*\{[^}]*height:\s*54px/);
+  assert.match(mobile, /\.mobile-composer\s*\{[^}]*height:\s*58px/);
 });
