@@ -2,6 +2,16 @@
 
 Plan: docs/superpowers/plans/2026-10-25-codex-three-targets.md
 
+## Current handoff state — 2026-10-26 01:15 Asia/Shanghai
+
+- User requested a restorable TAR under Desktop/看板交接; packaging implementation and evidence are tracked in docs/superpowers/plans/2026-10-26-handoff.md and docs/handoff.md. This is not a three-target completion claim.
+- Actual logged-in ChatGPT settings now expose https://chatgpt.com/settings/codex-cloud. The account is Pro; target repository is still not selectable and no environment was created.
+- GitHub form was narrowed to only jackygilbert498-debug/cloud-idea-board. After the user delegated the specifically described final authorization action, Install & Authorize reached Confirm access / Verify via email. No grant-success receipt, code retrieval or authentication bypass. Leave that genuine identity page for the owner; do not repeat routine consent questions.
+- Bounded PR#2 read-only check01:15: unchanged seed HEAD8167890adf4c54591ec0568e55d03059b6c7319d, one original human comment and no Codex review/reply. No repeated @codex. Cloud remains false.
+- OpenAI's app installation does not supply Netlify's separate least-privilege GitHub user token. Current legacy PR route only acknowledges official bot replies on explicit sync; automatic background final-result collection is not implemented or live accepted. Record those implementation gaps, not merely a login prerequisite.
+- Windows Scheduled Task rechecked Running; no re-pair, extra task, duplicate background installation, migration or production/Preview deployment change this round.
+- Handoff tool fresh verification: original112 + new14 real Git/TAR cases =126 pass, typecheck/lint/diff checks pass. Fresh independent review's file/directory prefix collision fixed RED→GREEN in both creator/verifier; boundary coverage expanded. Exact committed bytes export, reachable-history scan, non-clobber publication and per-file hashes; actual final TAR receipt belongs beside the frozen archive, not an invented in-source completion claim.
+
 ## Current verified state — 2026-10-25 18:07 Asia/Shanghai
 
 - Windows is genuinely paired and receiving in the background. Real owner UI task B succeeded in the foreground; task D succeeded under the hidden current-user Scheduled Task; queued task C was cancelled without starting a Codex session. IDs and operating limits are in docs/task-dispatch-acceptance.md.

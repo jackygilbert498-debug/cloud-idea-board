@@ -48,9 +48,11 @@ select has_function_privilege('authenticated',
 - [官方 GitHub 集成说明](https://learn.chatgpt.com/docs/third-party/github#give-codex-other-tasks)
 - [官方 legacy 云端环境说明](https://learn.chatgpt.com/docs/environments/cloud-environment)
 
-应从本人已登录的 Codex 界面确认仓库/集成设置。官方文档给出的 `chatgpt.com/settings/code-review` 是代码审查设置深链，不是本看板或发布任务页面；本轮未得到可用的登录后设置页，因此不把该深链当作已经验证的操作入口。
+应从本人已登录的 Codex 界面确认仓库/集成设置。2026-10-26本账号实际界面为 [设置 → Codex 云端](https://chatgpt.com/settings/codex-cloud)，已确认登录；目标仓库尚不可选，GitHub安装仍在要求本人邮箱身份验证，没有新环境成功回执。官方文档给出的 `chatgpt.com/settings/code-review` 是代码审查设置深链，不是本看板或发布任务页面，不把该深链当作已经验证的操作入口。
 
 本项目已建立独立的 [云端验收 PR #2](https://github.com/jackygilbert498-debug/cloud-idea-board/pull/2)，只请求修改一份验收文档。不要重复发送未知结果的评论。必须看到真实 Codex 回复、指定文件变更及测试/提交证据后，才能把此账号的云端路线记为 verified。没有回执时保留待开通状态，不回退到付费 API。
+
+当前GitHub查询由显式sync请求执行，只将已识别官方Bot的回复记作acknowledged，不自动推断任务成功；页面轮询任务表不等于服务端独立收集最终结果。手机关闭后的自动最终回执收集仍需可信webhook/后台同步实现及真实验收。OpenAI自己的GitHub App授权也不等于Netlify已经获得单独的有限用户凭据，不能复制或提取登录凭据来补这个缺口。
 
 平台取消只阻止后续派发。已经交给 GitHub/Codex 的在途请求不能撤回，也不代表云端执行已被停止；请打开原 PR/云任务核实。
 
